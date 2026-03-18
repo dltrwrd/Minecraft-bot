@@ -5,34 +5,24 @@ const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const GoalNear = goals.GoalNear;
+const { GoalNear, GoalFollow } = goals;
 const pvp = require('mineflayer-pvp');
 const autoeat = require('mineflayer-auto-eat');
+const { plugin: collectBlock } = require('mineflayer-collectblock');
 
 // ─────────────────────────────────────────
 //  CONFIG  (override via environment vars)
 // ─────────────────────────────────────────
 const CONFIG = {
-  // Minecraft server
   MC_HOST: process.env.MC_HOST || 'your-server-ip',
   MC_PORT: parseInt(process.env.MC_PORT) || 25565,
   MC_USERNAME: process.env.MC_USERNAME || 'KeepAliveBot',
-  MC_VERSION: process.env.MC_VERSION || '1.20.1', // change to match your server
-
-  // Auth: "offline" for cracked / "microsoft" for premium
+  MC_VERSION: process.env.MC_VERSION || '1.20.1',
   MC_AUTH: process.env.MC_AUTH || 'offline',
-
-  // Render self-ping
-  RENDER_URL: process.env.RENDER_URL || '', // e.g. https://your-app.onrender.com
-  PING_INTERVAL_MS: parseInt(process.env.PING_INTERVAL_MS) || 60 * 1000, // every 1 min
-
-  // Express port
+  RENDER_URL: process.env.RENDER_URL || '',
+  PING_INTERVAL_MS: parseInt(process.env.PING_INTERVAL_MS) || 60 * 1000,
   PORT: parseInt(process.env.PORT) || 3000,
-
-  // Reconnect delay (ms)
   RECONNECT_DELAY_MS: parseInt(process.env.RECONNECT_DELAY_MS) || 5000,
-
-  // Behavior interval (ms)
   AFK_INTERVAL_MS: parseInt(process.env.AFK_INTERVAL_MS) || 1000,
 };
 
@@ -41,12 +31,11 @@ const CONFIG = {
 // ─────────────────────────────────────────
 const RESET = '\x1b[0m';
 const COLORS = {
-  info: '\x1b[36m', // cyan
-  success: '\x1b[32m', // green
-  warn: '\x1b[33m', // yellow
-  error: '\x1b[31m', // red
-  chat: '\x1b[35m', // magenta
-  afk: '\x1b[34m', // blue
+  info: '\x1b[36m',
+  success: '\x1b[32m',
+  warn: '\x1b[33m',
+  error: '\x1b[31m',
+  chat: '\x1b[35m',
 };
 
 function log(type, msg) {
@@ -64,12 +53,14 @@ let reconnectTimer = null;
 let isConnected = false;
 let reconnectCount = 0;
 let botStartTime = null;
-let watchdogTimer = null; // Renamed to watchdogTimer and moved to outer scope
+let watchdogTimer = null;
+let botMode = 'AUTONOMOUS';
+let companionOwner = null;
+let isBusy = false;
 
 // ─────────────────────────────────────────
-//  ANTI-AFK
+//  ANTI-AFK BEHAVIORS
 // ─────────────────────────────────────────
-// Actions for mimicking a real player
 const PLAYER_ACTIONS = [
   // Jump
   b => {
@@ -78,93 +69,154 @@ const PLAYER_ACTIONS = [
       setTimeout(() => { if (b) b.setControlState('jump', false); }, 500);
     }
   },
-  // Swing arm (like mining/punching)
+  // Swing arm
   b => {
     if (!b.pvp?.target) b.swingArm('right');
   },
-  // Look at nearest player
+  // Look at entity
   b => {
     if (b.pvp?.target) return;
-    const filter = (e) => (e.type === 'player' || e.type === 'mob') && e.id !== b.entity.id && e.position.distanceTo(b.entity.position) < 16;
+    const filter = e => (e.type === 'player' || e.type === 'mob') && e.id !== b.entity.id && e.position.distanceTo(b.entity.position) < 16;
     const target = b.nearestEntity(filter);
-    if (target) {
-      b.lookAt(target.position.offset(0, target.height, 0));
-    }
+    if (target) b.lookAt(target.position.offset(0, target.height, 0));
   },
-  // Toggle Sneak (fast)
+  // Sneak
   b => {
     if (!b.pvp?.target) {
       b.setControlState('sneak', true);
       setTimeout(() => { if (b) b.setControlState('sneak', false); }, 200);
     }
   },
-  // Wander to a random location nearby
+  // Follow/Companion logic: Disable Wander if not Autonomous
   b => {
-    if (b.pathfinder.isMoving() || b.pvp?.target) return;
+    if (botMode !== 'AUTONOMOUS' || b.pathfinder.isMoving() || b.pvp?.target) return;
     const { x, y, z } = b.entity.position;
     const randomPos = {
       x: x + Math.floor(Math.random() * 10 - 5),
       y: y,
-      z: z + Math.floor(Math.random() * 10 - 5)
+      z: z + Math.floor(Math.random() * 10 - 5),
     };
     const movements = new Movements(b);
     b.pathfinder.setMovements(movements);
     b.pathfinder.setGoal(new GoalNear(randomPos.x, randomPos.y, randomPos.z, 1));
   },
-  // Pick up items (Looting)
+  // 🏃 Maintain Follow/Companion (Persistence)
   b => {
-    if (b.pathfinder.isMoving() || b.pvp?.target) return;
-    const filter = (e) => e.type === 'item' && e.position.distanceTo(b.entity.position) < 8;
-    const item = b.nearestEntity(filter);
-    if (item) {
-      const movements = new Movements(b);
-      b.pathfinder.setMovements(movements);
-      b.pathfinder.setGoal(new GoalNear(item.position.x, item.position.y, item.position.z, 0.5));
+    if (botMode === 'AUTONOMOUS' || b.pvp?.target || b.pathfinder.isMoving()) return;
+    
+    // Find the master entity manually to avoid stale references
+    const masterNick = companionOwner || Object.keys(b.players).find(k => k !== b.username); // Fallback to last chat user or someone else
+    const player = b.players[masterNick]?.entity;
+    
+    if (player) {
+      const dist = b.entity.position.distanceTo(player.position);
+      if (dist > 3) {
+        log('info', `👣 Master ${masterNick} is moving away... Following!`);
+        const movements = new Movements(b);
+        b.pathfinder.setMovements(movements);
+        b.pathfinder.setGoal(new GoalFollow(player, 2));
+      }
     }
   },
+  // Gathering
+  async b => {
+    if (botMode !== 'AUTONOMOUS' || isBusy || b.pvp?.target) return;
+    const items = b.inventory.items();
+    const logs = items.filter(i => i.name.endsWith('_log')).length;
+    const cobble = items.filter(i => i.name === 'cobblestone').length;
+    const hasPickaxe = items.some(i => i.name.endsWith('_pickaxe'));
+
+    if (logs < 4) {
+      const logBlock = b.findBlock({ matching: blk => blk.name.endsWith('_log'), maxDistance: 32 });
+      if (logBlock) {
+        isBusy = true;
+        log('info', `🪓 Mining ${logBlock.name}...`);
+        try { await b.collectBlock.collect(logBlock); } catch (e) {}
+        isBusy = false;
+        return;
+      }
+    }
+    if (hasPickaxe && cobble < 16) {
+      const stoneBlock = b.findBlock({ matching: blk => blk.name === 'stone' || blk.name === 'cobblestone', maxDistance: 32 });
+      if (stoneBlock) {
+        isBusy = true;
+        log('info', '⛏️ Mining stone for upgrades...');
+        try { await b.collectBlock.collect(stoneBlock); } catch (e) {}
+        isBusy = false;
+        return;
+      }
+    }
+  },
+  // Crafting & Equip
+  async b => {
+    if (isBusy || b.pvp?.target) return;
+    const items = b.inventory.items();
+    const hasItem = name => items.some(i => i.name.includes(name));
+
+    const autoCraft = async (targetName, count = 1) => {
+      if (hasItem(targetName)) return false;
+      const itemData = b.registry.itemsByName[targetName];
+      if (!itemData) return false;
+      const recipes = b.recipesFor(itemData.id, null, count, null);
+      if (recipes.length > 0) {
+        log('success', `🛠️ Crafting ${targetName}...`);
+        try { await b.craft(recipes[0], count, null); return true; } catch (e) {}
+      }
+      return false;
+    };
+
+    await autoCraft('oak_planks', 4);
+    if (await autoCraft('crafting_table')) return;
+    if (await autoCraft('stick', 4)) return;
+    if (!hasItem('pickaxe')) {
+       if (await autoCraft('stone_pickaxe')) return;
+       if (await autoCraft('wooden_pickaxe')) return;
+    }
+    if (!hasItem('sword')) {
+       if (await autoCraft('stone_sword')) return;
+       if (await autoCraft('wooden_sword')) return;
+    }
+    if (items.filter(i => i.name === 'cobblestone').length >= 8) if (await autoCraft('furnace')) return;
+
+    // Equip armor
+    const armorSlots = ['head', 'torso', 'legs', 'feet'];
+    for (const slot of armorSlots) {
+      const bestArmor = items.filter(i => i.name.includes('helmet') || i.name.includes('chestplate') || i.name.includes('leggings') || i.name.includes('boots'))
+                            .sort((a, b) => (b.value || 0) - (a.value || 0))[0];
+      if (bestArmor) b.equip(bestArmor, slot).catch(() => {});
+    }
+    const sword = items.filter(i => i.name.includes('sword')).sort((a,b) => (b.value || 0) - (a.value || 0))[0];
+    if (sword) b.equip(sword, 'hand').catch(() => {});
+  }
 ];
 
 function triggerRandomBehavior() {
-  if (!bot || !isConnected) return;
+  if (!bot || !isConnected || isBusy) return;
   const action = PLAYER_ACTIONS[Math.floor(Math.random() * PLAYER_ACTIONS.length)];
-  try {
-    action(bot);
-  } catch (e) {
-    /* ignore mid-reconnect errors */
-  }
+  try { action(bot); } catch (e) {}
 }
 
 function startAntiAFK() {
   stopAntiAFK();
-
   function loop() {
     triggerRandomBehavior();
-    // Add 0-500ms randomness so it's not a perfect mechanical heartbeat
-    const nextTick = CONFIG.AFK_INTERVAL_MS + Math.floor(Math.random() * 500);
-    afkTimer = setTimeout(loop, nextTick);
+    afkTimer = setTimeout(loop, CONFIG.AFK_INTERVAL_MS + Math.floor(Math.random() * 500));
   }
-
   loop();
 }
 
 function stopAntiAFK() {
-  if (afkTimer) {
-    clearTimeout(afkTimer);
-    afkTimer = null;
-  }
+  if (afkTimer) { clearTimeout(afkTimer); afkTimer = null; }
 }
 
 // ─────────────────────────────────────────
 //  CREATE BOT
 // ─────────────────────────────────────────
 function createBot() {
-  // Clean up old instance if it exists
   if (bot) {
     log('info', 'Cleaning up old bot instance...');
     bot.removeAllListeners();
-    try {
-      bot.quit();
-    } catch (e) {}
+    try { bot.quit(); } catch (e) {}
     bot = null;
   }
 
@@ -185,186 +237,166 @@ function createBot() {
       hideErrors: false,
     });
 
-    // Proper way to load plugins with safety
     const plugins = [
       { name: 'Pathfinder', fn: pathfinder },
       { name: 'PvP', fn: pvp.plugin },
-      { name: 'Auto-Eat', fn: autoeat.loader || autoeat }
+      { name: 'Auto-Eat', fn: autoeat.loader || autoeat },
+      { name: 'CollectBlock', fn: collectBlock },
     ];
 
     plugins.forEach(p => {
-      if (typeof p.fn === 'function') {
-        bot.loadPlugin(p.fn);
-      } else {
-        log('error', `Failed to load ${p.name}: plugin is not a function (type: ${typeof p.fn})`);
-      }
+      if (typeof p.fn === 'function') bot.loadPlugin(p.fn);
+      else log('error', `Failed to load ${p.name}`);
     });
 
-    // Watchdog: If nothing happens for 45s, force a reconnect
     watchdogTimer = setTimeout(() => {
       if (!isConnected) {
         log('warn', '🕒 Connection attempt timed out — forcing reconnect...');
         scheduleReconnect();
       }
     }, 45000);
+
   } catch (err) {
     log('error', `Failed to create bot: ${err.message}`);
     scheduleReconnect();
     return;
   }
 
-  // ── SPAWN ──
   bot.once('spawn', () => {
-    if (watchdogTimer) {
-      clearTimeout(watchdogTimer);
-      watchdogTimer = null;
-    }
+    if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
     isConnected = true;
     botStartTime = Date.now();
     reconnectCount = 0;
-    log('success', `✅ Bot spawned! Connected to ${CONFIG.MC_HOST}:${CONFIG.MC_PORT}`);
+    log('success', `✅ Bot spawned! Connected as ${bot.username}`);
 
-    // Auto-eat config
     if (bot.autoeat) {
       bot.autoeat.options = {
         priority: 'foodPoints',
         startAt: 14,
-        bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato']
+        bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato'],
       };
     }
-
     startAntiAFK();
   });
 
-  // ── SMART REVENGE (Combat) ──
   bot.on('entityHurt', (entity) => {
-    if (entity !== bot.entity) return;
+    const isMaster = (entity.type === 'player' && entity.username === companionOwner && botMode === 'COMPANION');
+    const player = bot.players[companionOwner]?.entity;
+    
+    // ASSIST ATTACK
+    if (botMode === 'COMPANION' && player && entity !== bot.entity && entity !== player) {
+       const distToMaster = player.position.distanceTo(entity.position);
+       if (distToMaster < 5) {
+          const dx = entity.position.x - player.position.x;
+          const dz = entity.position.z - player.position.z;
+          const angle = Math.atan2(-dx, -dz);
+          let diff = Math.abs(angle - player.yaw) % (Math.PI * 2);
+          if (diff > Math.PI) diff = Math.PI * 2 - diff;
+          if (diff < 0.6 && !bot.pvp?.target) {
+             bot.chat(`Sige Master, tulungan kita kay ${entity.username || entity.name}!`);
+             bot.pvp.attack(entity);
+             return;
+          }
+       }
+    }
 
-    const entities = bot.entities;
+    // SELF DEFENSE / PROTECTION
+    if (entity !== bot.entity && !isMaster) return;
+
     const suspects = [];
-
-    for (const id in entities) {
-      const e = entities[id];
-      if (e.id === bot.entity.id) continue;
+    for (const id in bot.entities) {
+      const e = bot.entities[id];
+      if (e.id === bot.entity.id || (e.type === 'player' && e.username === companionOwner)) continue;
       
-      // Catch all types of mobs/entities that aren't players
-      const isMob = (e.type === 'mob' || e.type === 'hostile' || e.type === 'passive');
-      const isPlayer = (e.type === 'player');
-
-      if (!isMob && !isPlayer) continue;
+      const isCombatant = (e.type === 'mob' || e.type === 'hostile' || e.type === 'passive' || e.type === 'player');
+      if (!isCombatant) continue;
 
       const dist = e.position.distanceTo(bot.entity.position);
-      if (dist > 30) continue; // Broad search for archers/mobs
+      if (dist > 30) continue; 
 
-      // Calculate angle/look-at
       const dx = bot.entity.position.x - e.position.x;
       const dz = bot.entity.position.z - e.position.z;
       const angleTowardBot = Math.atan2(-dx, -dz);
       let diff = Math.abs(angleTowardBot - e.yaw) % (Math.PI * 2);
       if (diff > Math.PI) diff = Math.PI * 2 - diff;
 
-      // DETECTION RULES:
-      if (isMob) {
-        // Any mob within 30 blocks is a suspect (safe over-detection)
-        suspects.push({ entity: e, dist: dist, type: 'mob' });
-      } else if (isPlayer && dist < 3 && diff < 0.2) {
-        // Players must be NEAR and STARING directly (0.2 rad = ~11 deg)
-        suspects.push({ entity: e, dist: dist, type: 'player' });
+      if (e.type !== 'player' || (dist < 4 && diff < 0.3)) {
+        suspects.push({ entity: e, dist: dist, type: e.type });
       }
     }
 
     if (suspects.length > 0 && !bot.pvp.target) {
-      // PRIORITY: MOBS > PLAYERS
-      const mobs = suspects.filter(s => s.type === 'mob').sort((a,b) => a.dist - b.dist);
-      const players = suspects.filter(s => s.type === 'player').sort((a,b) => a.dist - b.dist);
+      const targets = suspects.sort((a,b) => {
+        if (a.type !== 'player' && b.type === 'player') return -1;
+        if (a.type === 'player' && b.type !== 'player') return 1;
+        return a.dist - b.dist;
+      });
+      const target = targets[0].entity;
+      const victimStr = entity === bot.entity ? 'ako' : 'ang amo ko';
+      log('warn', `⚔️ RESBAK MODE: Sinasaktan ${victimStr}! Target: ${target.username || target.name}.`);
+      bot.chat(`Resbak mode! Huwag mong galawin ${victimStr}!`);
+      bot.pvp.attack(target);
+    }
+  });
 
-      let target = null;
-      if (mobs.length > 0) {
-        target = mobs[0].entity; // If a mob is anywhere nearby, it's the perp
-      } else if (players.length > 0) {
-        target = players[0].entity; // Only if NO mobs are within 30 blocks
-      }
+  bot.on('death', () => { if (bot.pvp?.target) bot.pvp.stop(); });
+  bot.on('stoppedAttacking', () => { log('info', '🏳️ Target gone or defeated. Combat stopped.'); });
 
-      if (target) {
-        const name = target.username || target.name || 'Unknown';
-        log('warn', `⚔️ RESBAK MODE: Detected ${name} (${target.type}) as the attacker. Babanatan na!`);
-        bot.pvp.attack(target);
-      }
+  bot.on('chat', (username, message) => {
+    if (username === bot.username) return;
+
+    if (message === '!follow') {
+      botMode = 'FOLLOW';
+      const player = bot.players[username]?.entity;
+      if (!player) return bot.chat('Hindi kita makita!');
+      bot.chat(`Sige, susunod ako sa'yo ${username}!`);
+      const movements = new Movements(bot);
+      bot.pathfinder.setMovements(movements);
+      bot.pathfinder.setGoal(new GoalFollow(player, 2));
+    } else if (message === '!companion') {
+      botMode = 'COMPANION';
+      companionOwner = username;
+      const player = bot.players[username]?.entity;
+      if (!player) return bot.chat('Hindi kita makita! Lumapit ka sa akin.');
+      bot.chat(`Ready na ako, Master ${username}! Ako ang bodyguard mo ngayon. Susunod ako at reresbak kapag may umaway sa'yo!`);
+      const movements = new Movements(bot);
+      bot.pathfinder.setMovements(movements);
+      bot.pathfinder.setGoal(new GoalFollow(player, 2));
+    } else if (message === '!stop') {
+      botMode = 'AUTONOMOUS';
+      companionOwner = null;
+      bot.chat('Sige, titigil na ako. Mag-e-explore muna ako at maghahanap ng gamit!');
+      bot.pathfinder.setGoal(null);
+    } else if (message === '!inventory') {
+      const items = bot.inventory.items().map(i => `${i.count}x ${i.name}`).join(', ');
+      bot.chat(items ? `Inventory ko: ${items}` : 'Wala akong gamit.');
     }
   });
 
   bot.on('death', () => {
-    if (bot.pvp?.target) bot.pvp.stop();
+    setTimeout(() => { try { bot.respawn(); } catch (e) {} }, 1500);
   });
 
-  bot.on('stoppedAttacking', () => {
-    log('info', '🏳️ Target gone or defeated. Combat stopped.');
-  });
-
-  // Skip chat/message listeners (no chat logs needed)
-
-  // ── AUTO RESPAWN ──
-  bot.on('death', () => {
-    // log("warn", "💀 Bot died — respawning...");
-    setTimeout(() => {
-      try {
-        bot.respawn();
-        // log("success", "✅ Respawned successfully");
-      } catch (e) {
-        log('error', `Respawn failed: ${e.message}`);
-      }
-    }, 1500);
-  });
-
-  // ── HEALTH LOG ──
-  bot.on('health', () => {
-    if (bot.health <= 4) {
-      // log("warn", `❤️  Low health! HP: ${bot.health.toFixed(1)} | Food: ${bot.food}`);
-    }
-  });
-
-  // ── KICKED ──
   bot.on('kicked', reason => {
     isConnected = false;
     stopAntiAFK();
-    let reasonText = reason;
-    try {
-      reasonText = JSON.parse(reason)?.text || reason;
-    } catch (_) {}
-    log('warn', `⚠️  Bot was kicked: ${reasonText}`);
-    if (watchdogTimer) {
-      clearTimeout(watchdogTimer);
-      watchdogTimer = null;
-    }
+    log('warn', `⚠️ Bot was kicked: ${reason}`);
     scheduleReconnect();
   });
 
-  // ── ERROR ──
-  bot.on('error', err => {
-    log('error', `Bot error: ${err.message}`);
-    // don't reconnect here — 'end' will fire after error
-  });
-
-  // ── END / DISCONNECT ──
+  bot.on('error', err => { log('error', `Bot error: ${err.message}`); });
   bot.on('end', reason => {
     isConnected = false;
     stopAntiAFK();
-    log('warn', `🔌 Connection ended: ${reason || 'unknown reason'}`);
-    if (watchdogTimer) {
-      clearTimeout(watchdogTimer);
-      watchdogTimer = null;
-    }
+    log('warn', `🔌 Connection ended: ${reason}`);
     scheduleReconnect();
   });
 }
 
-// ─────────────────────────────────────────
-//  RECONNECT
-// ─────────────────────────────────────────
 function scheduleReconnect() {
-  if (reconnectTimer) return; // already scheduled
+  if (reconnectTimer) return;
   reconnectCount++;
-  const delay = Math.min(CONFIG.RECONNECT_DELAY_MS * reconnectCount, 60000); // cap at 60s
+  const delay = Math.min(CONFIG.RECONNECT_DELAY_MS * reconnectCount, 60000);
   log('info', `🔄 Reconnecting in ${delay / 1000}s... (attempt #${reconnectCount})`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -372,77 +404,33 @@ function scheduleReconnect() {
   }, delay);
 }
 
-// ─────────────────────────────────────────
-//  EXPRESS  +  SELF-PINGER
-// ─────────────────────────────────────────
 const app = express();
-
 app.get('/', (req, res) => {
-  const uptime = botStartTime ? Math.floor((Date.now() - botStartTime) / 1000) : 0;
-
-  res.json({
-    status: 'running',
-    bot: {
-      connected: isConnected,
-      username: CONFIG.MC_USERNAME,
-      server: `${CONFIG.MC_HOST}:${CONFIG.MC_PORT}`,
-      uptime_seconds: uptime,
-      reconnect_attempts: reconnectCount,
-    },
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ status: 'running', bot: { connected: isConnected, username: CONFIG.MC_USERNAME } });
 });
-
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
-});
-
+app.get('/health', (req, res) => res.status(200).send('OK'));
 app.listen(CONFIG.PORT, () => {
   log('success', `🌐 HTTP server listening on port ${CONFIG.PORT}`);
   startSelfPinger();
   createBot();
 });
 
-// ─────────────────────────────────────────
-//  SELF-PINGER  (prevents Render spin-down)
-// ─────────────────────────────────────────
 function startSelfPinger() {
-  if (!CONFIG.RENDER_URL) {
-    log('warn', 'RENDER_URL not set — self-pinger disabled. Set it in your env vars!');
-    return;
-  }
-
-  const pingUrl = `${CONFIG.RENDER_URL}/health`;
-  log(
-    'info',
-    `🏓 Self-pinger started → ${pingUrl} every ${CONFIG.PING_INTERVAL_MS / 1000 / 60} min`
-  );
-
+  if (!CONFIG.RENDER_URL) return;
   setInterval(async () => {
     try {
-      const res = await fetch(pingUrl, { timeout: 10000 });
+      const res = await fetch(`${CONFIG.RENDER_URL}/health`, { timeout: 10000 });
       log('info', `The server is up (${res.status})`);
-    } catch (err) {
-      log('error', `The server is down: ${err.message}`);
-    }
+    } catch (err) {}
   }, CONFIG.PING_INTERVAL_MS);
 }
 
-// ─────────────────────────────────────────
-//  GRACEFUL SHUTDOWN
-// ─────────────────────────────────────────
 process.on('SIGINT', () => {
   log('info', 'Shutting down...');
   stopAntiAFK();
-  if (bot) bot.quit('Shutting down');
+  if (bot) bot.quit();
   process.exit(0);
 });
 
-process.on('uncaughtException', err => {
-  log('error', `Uncaught exception: ${err.message}`);
-  // keep process alive, bot will auto-reconnect
-});
-
-process.on('unhandledRejection', reason => {
-  log('error', `Unhandled rejection: ${reason}`);
-});
+process.on('uncaughtException', err => { log('error', `Uncaught exception: ${err.message}`); });
+process.on('unhandledRejection', reason => { log('error', `Unhandled rejection: ${reason}`); });
