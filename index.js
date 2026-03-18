@@ -23,7 +23,7 @@ const CONFIG = {
   PING_INTERVAL_MS: parseInt(process.env.PING_INTERVAL_MS) || 60 * 1000,
   PORT: parseInt(process.env.PORT) || 3000,
   RECONNECT_DELAY_MS: parseInt(process.env.RECONNECT_DELAY_MS) || 5000,
-  AFK_INTERVAL_MS: parseInt(process.env.AFK_INTERVAL_MS) || 1000,
+  AFK_INTERVAL_MS: parseInt(process.env.AFK_INTERVAL_MS) || 30000,
 };
 
 // ─────────────────────────────────────────
@@ -282,7 +282,13 @@ function createBot() {
         bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato'],
       };
     }
-    startAntiAFK();
+    // Delay behavior start to avoid anti-bot kicks immediately after spawn
+    setTimeout(() => {
+      if (isConnected) {
+        log('info', '🕒 Grace period ended. Starting autonomous behaviors...');
+        startAntiAFK();
+      }
+    }, 10000); // 10 second wait
   });
 
   bot.on('entityHurt', (entity) => {
