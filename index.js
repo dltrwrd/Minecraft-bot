@@ -66,11 +66,42 @@ let recentLogs = [];
 let isAttacked = false;
 let attackTimeout = null;
 let isBusy = false;
+let activeLoopId = 0;
+let botModules = {
+  eat: true,
+  craft: true,
+  mine: true,
+  hunt: true,
+  pvp: true
+};
 
 // ─────────────────────────────────────────
 //  ANTI-AFK BEHAVIORS
 // ─────────────────────────────────────────
 const PLAYER_ACTIONS = [
+  // eatAction: Manual Fallback Eat (High Priority)
+  Object.assign(async b => {
+    if (!botModules.eat || b.food >= 19 || isBusy) return false;
+    const items = b.inventory.items();
+    const foodItems = items.filter(i => 
+      ['beef','porkchop','mutton','chicken','rabbit','cod','salmon','apple','bread','carrot','potato','melon_slice','sweet_berries','glow_berries','cookie','pumpkin_pie','steak','cooked_porkchop','cooked_mutton','cooked_chicken','cooked_rabbit', 'cooked_cod', 'cooked_salmon','baked_potato','golden_apple','golden_carrot'].includes(i.name)
+    );
+    if (foodItems.length > 0) {
+      const bestFood = foodItems.sort((a,b) => (b.foodPoints || 0) - (a.foodPoints || 0))[0];
+      isBusy = true;
+      log('info', `🥪 Manual Eat: Consuming ${bestFood.name} (Hunger: ${b.food}/20)...`);
+      try {
+        await b.equip(bestFood, 'hand');
+        await b.consume();
+        return true;
+      } catch (e) {
+        log('error', `Manual Eat failed: ${e.message}`);
+      } finally {
+        isBusy = false;
+      }
+    }
+    return false;
+  }, { taskName: 'eatAction' }),
   // idleAction: Jump
   Object.assign(b => {
     if (!b.pathfinder.isMoving() && !b.pvp?.target) {
@@ -129,26 +160,26 @@ const PLAYER_ACTIONS = [
     const hasPickaxe = items.some(i => i.name.includes('pickaxe'));
     const hasStonePickaxe = items.some(i => i.name.includes('stone_pickaxe'));
 
-    // WOOD
-    if (logs < 16) {
+    // WOOD / LOGS
+    if (botModules.mine && logs < 16) {
       const logBlock = b.findBlock({ matching: blk => blk.name.endsWith('_log'), maxDistance: 32 });
       if (logBlock) {
         isBusy = true;
         log('info', `🪓 Mining ${logBlock.name}...`);
         try { await b.collectBlock.collect(logBlock); } catch (e) {}
-        isBusy = false;
+        finally { isBusy = false; }
         return true;
       }
     }
 
     // STONE & IRON
-    if (hasPickaxe && cobble < 64) {
+    if (botModules.mine && hasPickaxe && cobble < 64) {
       const stoneBlock = b.findBlock({ matching: blk => blk.name === 'stone' || blk.name === 'cobblestone' || (hasStonePickaxe && blk.name.includes('iron_ore')), maxDistance: 32 });
       if (stoneBlock) {
         isBusy = true;
         log('info', `⛏️ Mining ${stoneBlock.name} for resources...`);
         try { await b.collectBlock.collect(stoneBlock); } catch (e) {}
-        isBusy = false;
+        finally { isBusy = false; }
         return true;
       }
     }
@@ -158,7 +189,7 @@ const PLAYER_ACTIONS = [
     const foodItems = items.filter(i => ['beef', 'porkchop', 'mutton', 'chicken', 'rabbit', 'cod', 'salmon'].some(f => i.name.includes(f)));
     
     // Hunt if we need armor OR if we're low on food
-    if (armorItems.length < 4 || foodItems.length < 5 || b.food < 15) {
+    if (botModules.hunt && (armorItems.length < 4 || foodItems.length < 5 || b.food < 15)) {
       const target = b.nearestEntity(e => e.type === 'mob' && (['cow', 'sheep', 'pig', 'chicken'].includes(e.name)) && e.position.distanceTo(b.entity.position) < 24);
       if (target) {
         log('info', `🥩 Hunting ${target.name} for food/leather...`);
@@ -188,8 +219,8 @@ const PLAYER_ACTIONS = [
       const itemData = b.registry.itemsByName[targetName];
       if (!itemData) return false;
 
-      // 🔍 Find nearby crafting table
-      let tableBlock = b.findBlock({ matching: blk => blk.name === 'crafting_table', maxDistance: 4 });
+      // 🔍 Find nearby crafting table (Search widely to avoid 'messes' of tables)
+      let tableBlock = b.findBlock({ matching: blk => blk.name === 'crafting_table', maxDistance: 32 });
       
       // 🛠️ Determine if this recipe REQUIRES a 3x3 table
       const recipes2x2 = b.recipesFor(itemData.id, null, 1, null);
@@ -207,11 +238,18 @@ const PLAYER_ACTIONS = [
                try {
                   const tableItem = b.inventory.items().find(i => i.name === 'crafting_table');
                   if (tableItem) {
+                     // 🥾 Move slightly away to avoid standing on the spot
+                     const p = ground.position.offset(0.5, 1, 0.5);
+                     if (b.entity.position.distanceTo(p) < 1.5) {
+                        const movePos = p.offset(Math.random() > 0.5 ? 2 : -2, 0, Math.random() > 0.5 ? 2 : -2);
+                        b.pathfinder.setMovements(new Movements(b));
+                        await b.pathfinder.goto(new GoalNear(movePos.x, movePos.y, movePos.z, 0.5));
+                     }
+
                      await b.equip(tableItem, 'hand');
-                     const faceVector = b.entity.position.clone();
-                     faceVector.x = 0; faceVector.y = 1; faceVector.z = 0;
+                     await b.lookAt(ground.position.offset(0.5, 1, 0.5));
                      log('info', `🏗️ Placing table on ${ground.name} at ${ground.position}...`);
-                     await b.placeBlock(ground, faceVector); 
+                     await b.placeBlock(ground, new Vec3(0, 1, 0)); 
                      // Wait a moment for server to sync
                      await new Promise(r => setTimeout(r, 500));
                      tableBlock = b.findBlock({ matching: blk => blk.name === 'crafting_table', maxDistance: 4 });
@@ -220,8 +258,9 @@ const PLAYER_ACTIONS = [
                   log('error', `Placement failed: ${e.message}`); 
                   // Add a cooldown if placement fails
                   await new Promise(r => setTimeout(r, 2000));
+               } finally {
+                  isBusy = false;
                }
-               isBusy = false;
             }
          } else {
             return false;
@@ -230,6 +269,13 @@ const PLAYER_ACTIONS = [
 
       const recipes = b.recipesFor(itemData.id, tableBlock, 1, null);
       if (recipes.length > 0) {
+        // 🚶 Walk to the table if it's too far away
+        if (tableBlock && b.entity.position.distanceTo(tableBlock.position) > 3) {
+           log('info', `🚶 Walking to crafting table at ${tableBlock.position}...`);
+           b.pathfinder.setMovements(new Movements(b));
+           try { await b.pathfinder.goto(new GoalNear(tableBlock.position.x, tableBlock.position.y, tableBlock.position.z, 2)); } catch(e) {}
+        }
+
         log('success', `🛠️ Crafting ${targetName}...`);
         try { 
            await b.craft(recipes[0], 1, tableBlock); 
@@ -319,7 +365,7 @@ const PLAYER_ACTIONS = [
   }, { taskName: 'craftingAction' })
 ];
 
-function triggerRandomBehavior() {
+async function triggerRandomBehavior() {
   if (!bot || !isConnected || isBusy) return;
 
   // 🛡️ TOP PRIORITY: GEAR CHECK (Runs every tick! Done before anything else)
@@ -344,7 +390,16 @@ function triggerRandomBehavior() {
      bot.equip(bestSword, 'hand').catch(() => {});
   }
 
-  // 1️⃣ PRIORITY: FOLLOW MASTER
+  // 1️⃣ PRIORITY: EATING (Manual Check)
+  if (botModules.eat && bot.food < 19) {
+    const eatAction = PLAYER_ACTIONS.find(p => p.taskName === 'eatAction');
+    if (eatAction) {
+       const result = await eatAction(bot);
+       if (result === true) return; 
+    }
+  }
+
+  // 2️⃣ PRIORITY: FOLLOW/COMPANION
   if (botMode !== 'AUTONOMOUS' && !bot.pvp?.target && !bot.pathfinder.isMoving()) {
     const masterNick = companionOwner || Object.keys(bot.players).find(k => k !== bot.username);
     const player = bot.players[masterNick]?.entity;
@@ -371,19 +426,19 @@ function triggerRandomBehavior() {
   if (bot.pvp?.target) return;
 
   // 3️⃣ PRIORITY: CRAFTING
-  if (botMode === 'AUTONOMOUS') {
+  if (botMode === 'AUTONOMOUS' && botModules.craft) {
     const craftAction = PLAYER_ACTIONS.find(p => p.taskName === 'craftingAction');
     if (craftAction) {
-       const result = craftAction(bot);
+       const result = await craftAction(bot);
        if (result === true) return; 
     }
   }
 
-  // 4️⃣ PRIORITY: GATHERING
-  if (botMode === 'AUTONOMOUS') {
+  // 4️⃣ PRIORITY: GATHERING (MINE & HUNT)
+  if (botMode === 'AUTONOMOUS' && (botModules.mine || botModules.hunt)) {
     const gatherAction = PLAYER_ACTIONS.find(p => p.taskName === 'gatheringAction');
     if (gatherAction) {
-       const result = gatherAction(bot);
+       const result = await gatherAction(bot);
        if (result === true) return; 
     }
   }
@@ -402,11 +457,18 @@ function triggerRandomBehavior() {
 
 function startAntiAFK() {
   stopAntiAFK();
-  function loop() {
-    triggerRandomBehavior();
+  const loopId = ++activeLoopId;
+  async function loop() {
+    if (loopId !== activeLoopId) {
+       log('warn', '🛑 Stopping zombie behavior loop.');
+       return;
+    }
+    await triggerRandomBehavior();
     // Use faster interval if in COMPANION/FOLLOW mode
     const interval = (botMode === 'AUTONOMOUS') ? CONFIG.AFK_INTERVAL_MS : Math.min(CONFIG.AFK_INTERVAL_MS, 2000);
-    afkTimer = setTimeout(loop, interval + Math.floor(Math.random() * 500));
+    if (loopId === activeLoopId) {
+       afkTimer = setTimeout(loop, interval + Math.floor(Math.random() * 500));
+    }
   }
   loop();
 }
@@ -446,6 +508,8 @@ function createBot() {
       viewDistance: 'tiny', // Lower data usage to avoid overload
     });
 
+    bot.setMaxListeners(30);
+
     const plugins = [
       { name: 'Pathfinder', fn: pathfinder },
       { name: 'PvP', fn: pvp.plugin },
@@ -481,9 +545,10 @@ function createBot() {
     if (bot.autoEat) {
       bot.autoEat.options = {
         priority: 'foodPoints',
-        startAt: 14,
-        bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato'],
+        startAt: 19,
       };
+      if (botModules.eat) bot.autoEat.enableAuto();
+      else bot.autoEat.disableAuto();
     }
     // Delay behavior start briefly to avoid kicks
     setTimeout(() => {
@@ -538,6 +603,7 @@ function createBot() {
     }
 
     // SELF DEFENSE / PROTECTION
+    if (!botModules.pvp) return;
     if (entity !== bot.entity && !isMaster) return;
 
     const suspects = [];
@@ -656,6 +722,22 @@ app.get('/api/status', (req, res) => {
     pos: bot.entity?.position,
     inventory: items,
     owner: companionOwner,
+    modules: botModules,
+    environment: {
+       biome: bot.blockAt(bot.entity.position)?.biome?.name || 'Unknown',
+       dimension: bot.game?.dimension || 'overworld',
+       time: bot.time?.timeOfDay || 0,
+       isDay: bot.time?.timeOfDay < 13000
+    },
+    entities: Object.values(bot.entities)
+      .filter(e => e.type !== 'object' && e.id !== bot.entity?.id && e.position.distanceTo(bot.entity.position) < 32)
+      .map(e => ({
+         name: e.displayName || e.username || e.name,
+         type: e.type,
+         pos: e.position,
+         dist: e.position.distanceTo(bot.entity.position).toFixed(1),
+         isHostile: (['zombie','skeleton','creeper','spider','enderman','witch','slime','phantom','drowned','husk','stray','hoglin','piglin','zoglin'].includes(e.name))
+      })),
     players: Object.keys(bot.players || {}),
     config: { host: CONFIG.MC_HOST, port: CONFIG.MC_PORT, username: CONFIG.MC_USERNAME }
   });
@@ -682,11 +764,23 @@ app.get('/api/events', (req, res) => {
       isAttacked,
       pos: bot.entity?.position,
       inventory: items,
-      players: Object.keys(bot.players || {}).map(name => ({
-         name,
-         dist: bot.entity?.position.distanceTo(bot.players[name]?.entity?.position || bot.entity.position).toFixed(1)
-      })),
+      environment: {
+         biome: bot.blockAt(bot.entity.position)?.biome?.name || 'Unknown',
+         dimension: bot.game?.dimension || 'overworld',
+         time: bot.time?.timeOfDay || 0,
+         isDay: (bot.time?.timeOfDay < 13000)
+      },
+      entities: Object.values(bot.entities)
+        .filter(e => e.type !== 'object' && e.id !== bot.entity?.id && e.position.distanceTo(bot.entity.position) < 32)
+        .map(e => ({
+           name: e.displayName || e.username || e.name,
+           type: e.type,
+           pos: e.position,
+           dist: e.position.distanceTo(bot.entity.position).toFixed(1),
+           isHostile: (['zombie','skeleton','creeper','spider','enderman','witch','slime','phantom','drowned','husk','stray','hoglin','piglin','zoglin'].includes(e.name))
+        })),
       logs: recentLogs,
+      modules: botModules,
       config: { host: CONFIG.MC_HOST, port: CONFIG.MC_PORT, username: CONFIG.MC_USERNAME }
     };
     res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -722,9 +816,14 @@ app.post('/api/action', (req, res) => {
   } else if (action === 'mine_cobble') {
      botMode = 'AUTONOMOUS'; // Auto logic will prioritize mining if table/pickaxe sorted
      log('info', '⛏️ Web Control: Prioritizing resource gathering.');
-  } else if (action === 'stop_path') {
-     bot.pathfinder.setGoal(null);
-     log('warn', '🛑 Web Control: Stopped all pathfinding.');
+  } else if (action === 'reset') {
+     botMode = 'IDLE';
+     isBusy = false;
+     isAttacked = false;
+     if (bot.pathfinder) bot.pathfinder.setGoal(null);
+     if (bot.collectBlock) try { bot.collectBlock.stop(); } catch (e) {}
+     if (bot.pvp) bot.pvp.stop();
+     log('warn', '🛑 Web Control: Reset all bot behaviors and set mode to IDLE.');
   }
   res.json({ success: true });
 });
@@ -748,9 +847,15 @@ app.post('/api/mode', (req, res) => {
     botMode = mode;
     const targetOwner = owner || CONFIG.MC_OWNER;
     if (targetOwner) companionOwner = targetOwner;
-    
+
+    // Reset temporary states before logic starts for new mode
+    isBusy = false;
+    isAttacked = false;
+    if (bot.pathfinder) bot.pathfinder.setGoal(null);
+    if (bot.collectBlock) try { bot.collectBlock.stop(); } catch (e) {}
+    if (bot.pvp) bot.pvp.stop();
+
     if (bot.pathfinder) {
-      bot.pathfinder.setGoal(null);
       if ((mode === 'FOLLOW' || mode === 'COMPANION') && targetOwner) {
          const player = bot.players[targetOwner]?.entity;
          if (player) {
@@ -766,6 +871,21 @@ app.post('/api/mode', (req, res) => {
     return res.json({ success: true, mode });
   }
   res.status(400).json({ error: 'Invalid mode' });
+});
+
+app.post('/api/modules', (req, res) => {
+  const { modules } = req.body;
+  if (modules) {
+    botModules = { ...botModules, ...modules };
+    // Apply immediate changes to plugins if necessary
+    if (bot && bot.autoEat) {
+      if (botModules.eat) bot.autoEat.enableAuto();
+      else bot.autoEat.disableAuto();
+    }
+    log('info', `🌐 Web Control: Survival Modules updated: ${JSON.stringify(botModules)}`);
+    return res.json({ success: true, modules: botModules });
+  }
+  res.status(400).json({ error: 'Invalid module config' });
 });
 
 app.post('/api/chat', (req, res) => {
