@@ -293,7 +293,7 @@ function createBot() {
           let diff = Math.abs(angle - player.yaw) % (Math.PI * 2);
           if (diff > Math.PI) diff = Math.PI * 2 - diff;
           if (diff < 0.6 && !bot.pvp?.target) {
-             bot.chat(`Sige Master, tulungan kita kay ${entity.username || entity.name}!`);
+             bot.chat(`Sure Master, I'll help you with ${entity.username || entity.name}!`);
              bot.pvp.attack(entity);
              return;
           }
@@ -332,9 +332,9 @@ function createBot() {
         return a.dist - b.dist;
       });
       const target = targets[0].entity;
-      const victimStr = entity === bot.entity ? 'ako' : 'ang amo ko';
-      log('warn', `⚔️ RESBAK MODE: Sinasaktan ${victimStr}! Target: ${target.username || target.name}.`);
-      bot.chat(`Resbak mode! Huwag mong galawin ${victimStr}!`);
+      const victimStr = entity === bot.entity ? 'me' : 'my master';
+      log('warn', `⚔️ RETALIATION MODE: Someone's hurting ${victimStr}! Target: ${target.username || target.name}.`);
+      bot.chat(`Retaliation mode! Don't you dare touch ${victimStr}!`);
       bot.pvp.attack(target);
     }
   });
@@ -348,8 +348,8 @@ function createBot() {
     if (message === '!follow') {
       botMode = 'FOLLOW';
       const player = bot.players[username]?.entity;
-      if (!player) return bot.chat('Hindi kita makita!');
-      bot.chat(`Sige, susunod ako sa'yo ${username}!`);
+      if (!player) return bot.chat("I can't see you!");
+      bot.chat(`Okay, I'm following you ${username}!`);
       const movements = new Movements(bot);
       bot.pathfinder.setMovements(movements);
       bot.pathfinder.setGoal(new GoalFollow(player, 2));
@@ -357,19 +357,19 @@ function createBot() {
       botMode = 'COMPANION';
       companionOwner = username;
       const player = bot.players[username]?.entity;
-      if (!player) return bot.chat('Hindi kita makita! Lumapit ka sa akin.');
-      bot.chat(`Ready na ako, Master ${username}! Ako ang bodyguard mo ngayon. Susunod ako at reresbak kapag may umaway sa'yo!`);
+      if (!player) return bot.chat("I can't see you! Come closer to me.");
+      bot.chat(`I'm ready, Master ${username}! I'm your bodyguard now. I'll follow you and retaliate if someone messes with you!`);
       const movements = new Movements(bot);
       bot.pathfinder.setMovements(movements);
       bot.pathfinder.setGoal(new GoalFollow(player, 2));
     } else if (message === '!stop') {
       botMode = 'AUTONOMOUS';
       companionOwner = null;
-      bot.chat('Sige, titigil na ako. Mag-e-explore muna ako at maghahanap ng gamit!');
+      bot.chat("Got it, I'll stop now. I'm going to explore and find some gear!");
       bot.pathfinder.setGoal(null);
     } else if (message === '!inventory') {
       const items = bot.inventory.items().map(i => `${i.count}x ${i.name}`).join(', ');
-      bot.chat(items ? `Inventory ko: ${items}` : 'Wala akong gamit.');
+      bot.chat(items ? `My inventory: ${items}` : "I don't have any items.");
     }
   });
 
