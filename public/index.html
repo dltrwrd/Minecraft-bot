@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Antigravity Command Center</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Outfit', 'sans-serif'] },
+                    colors: {
+                        dark: { 900: '#0a0a0c', 800: '#151518', 700: '#1e1e24' }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @keyframes pulse-ring { 0% { transform: scale(0.33); opacity: 1; } 80%, 100% { opacity: 0; } }
+        .status-pulse::before { content: ''; position: absolute; width:100%; height:100%; background: inherit; border-radius: inherit; animation: pulse-ring 1.5s infinite; }
+        .glass { background: rgba(21, 21, 24, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); }
+        .combat-glow { animation: combat-flash 0.5s infinite alternate; }
+        @keyframes combat-flash { from { box-shadow: 0 0 0px #ef4444; } to { box-shadow: inset 0 0 50px rgba(239, 68, 68, 0.3); } }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
+    </style>
+</head>
+<body id="main-body" class="bg-dark-900 text-slate-100 min-h-screen font-sans transition-all duration-300">
+    
+    <!-- COMBAT BANNER -->
+    <div id="combat-banner" class="hidden fixed top-0 left-0 w-full bg-red-600/90 text-white p-2 font-black text-center z-[100] animate-bounce uppercase tracking-widest text-sm">
+        ⚠️ Immediate Danger: Bot is under attack! ⚔️
+    </div>
+
+    <!-- HEADER -->
+    <header class="border-b border-white/5 p-6 backdrop-blur-md sticky top-0 z-50">
+        <div class="max-w-[1600px] mx-auto flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <div class="bg-indigo-600 p-2 rounded-xl"><i data-lucide="shield-alert" class="w-6 h-6 text-white"></i></div>
+                <h1 class="text-2xl font-extrabold tracking-tight bg-gradient-to-r from-indigo-400 to-violet-400 bg-clip-text text-transparent italic">COMMAND CENTER</h1>
+            </div>
+            <div class="flex items-center gap-6">
+                <div class="hidden md:flex items-center gap-4 bg-white/5 py-2 px-4 rounded-full border border-white/5">
+                    <div id="conn-dot" class="w-2.5 h-2.5 rounded-full bg-red-500 relative status-pulse"></div>
+                    <span id="bot-name" class="font-semibold text-sm">Offline</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-[1600px] mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        <!-- LEFT PANEL: SETTINGS & RADAR -->
+        <div class="lg:col-span-3 space-y-6">
+            <!-- NETWORK -->
+            <div class="glass p-5 rounded-3xl space-y-4">
+                <h3 class="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500"><i data-lucide="globe" class="w-3 h-3"></i> System Link</h3>
+                <div class="space-y-3">
+                    <input type="text" id="host-input" placeholder="Server IP" class="w-full bg-white/5 border border-white/5 rounded-xl p-2.5 text-xs outline-none focus:border-indigo-500/50">
+                    <div class="flex gap-2">
+                        <input type="text" id="user-input" placeholder="Bot User" class="flex-1 bg-white/5 border border-white/5 rounded-xl p-2.5 text-xs outline-none focus:border-indigo-500/50">
+                        <button onclick="saveConfig()" class="bg-indigo-600 hover:bg-indigo-500 p-2.5 rounded-xl transition-all"><i data-lucide="play" class="w-4 h-4"></i></button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RADAR -->
+            <div class="glass p-5 rounded-3xl space-y-4 min-h-[300px]">
+                <h3 class="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500"><i data-lucide="radar" class="w-3 h-3"></i> Local Entities</h3>
+                <div id="radar-list" class="space-y-2 max-h-[400px] overflow-y-auto">
+                    <!-- Players -->
+                </div>
+            </div>
+        </div>
+
+        <!-- CENTER PANEL: STATUS & ACTIONS -->
+        <div class="lg:col-span-6 space-y-6">
+            <!-- VITALS (GRID 2) -->
+            <div class="grid grid-cols-2 gap-4">
+                <div class="glass p-6 rounded-3xl relative overflow-hidden group">
+                    <div class="absolute top-0 left-0 h-1 bg-red-500" id="hp-line" style="width: 0%"></div>
+                    <div class="flex justify-between items-center mb-4">
+                        <i data-lucide="heart" class="text-red-500 w-5 h-5"></i>
+                        <span id="hp-text" class="text-lg font-black">0/20</span>
+                    </div>
+                    <div class="text-[10px] text-slate-500 uppercase font-black tracking-tighter">Health Status</div>
+                </div>
+                <div class="glass p-6 rounded-3xl relative overflow-hidden group">
+                    <div class="absolute top-0 left-0 h-1 bg-orange-500" id="food-line" style="width: 0%"></div>
+                    <div class="flex justify-between items-center mb-4">
+                        <i data-lucide="utensils" class="text-orange-500 w-5 h-5"></i>
+                        <span id="food-text" class="text-lg font-black">0/20</span>
+                    </div>
+                    <div class="text-[10px] text-slate-500 uppercase font-black tracking-tighter">Saturation Level</div>
+                </div>
+            </div>
+
+            <!-- ACTION CENTER -->
+            <div class="glass p-6 rounded-3xl space-y-4">
+                <h3 class="text-[10px] font-black uppercase tracking-widest text-slate-500">Action Overrides</h3>
+                <div class="grid grid-cols-3 gap-3 text-center">
+                    <button onclick="triggerAction('eat')" class="p-3 bg-white/5 rounded-2xl border border-white/5 hover:bg-orange-500/20 hover:border-orange-500/30 transition-all">
+                        <i data-lucide="apple" class="w-5 h-5 mx-auto mb-1 text-orange-400"></i>
+                        <div class="text-[10px] font-bold">Eat</div>
+                    </button>
+                    <button onclick="triggerAction('mine_cobble')" class="p-3 bg-white/5 rounded-2xl border border-white/5 hover:bg-indigo-500/20 hover:border-indigo-500/30 transition-all">
+                        <i data-lucide="pickaxe" class="w-5 h-5 mx-auto mb-1 text-indigo-400"></i>
+                        <div class="text-[10px] font-bold">Hunt Ore</div>
+                    </button>
+                    <button onclick="triggerAction('stop_path')" class="p-3 bg-white/5 rounded-2xl border border-white/5 hover:bg-red-500/20 hover:border-red-500/30 transition-all">
+                        <i data-lucide="square" class="w-5 h-5 mx-auto mb-1 text-red-500"></i>
+                        <div class="text-[10px] font-bold">Halt</div>
+                    </button>
+                </div>
+            </div>
+
+            <!-- BEHAVIOR -->
+            <div class="glass p-6 rounded-3xl space-y-4">
+                <div class="flex justify-between items-center">
+                    <h3 class="text-[10px] font-black uppercase tracking-widest text-slate-500">Behavior Logic</h3>
+                    <select id="player-select" class="bg-white/5 border border-white/5 rounded-xl px-2 py-1 text-[10px] outline-none font-bold">
+                        <option value="">Nearby Mode</option>
+                    </select>
+                </div>
+                <div class="grid grid-cols-4 gap-2">
+                    <button data-mode="AUTONOMOUS" class="mode-btn p-3 rounded-2xl bg-white/5 text-[11px] font-black border border-white/5 transition-all">AUTO</button>
+                    <button data-mode="COMPANION" class="mode-btn p-3 rounded-2xl bg-white/5 text-[11px] font-black border border-white/5 transition-all">GUARD</button>
+                    <button data-mode="FOLLOW" class="mode-btn p-3 rounded-2xl bg-white/5 text-[11px] font-black border border-white/5 transition-all">FOLLOW</button>
+                    <button data-mode="IDLE" class="mode-btn p-3 rounded-2xl bg-white/5 text-[11px] font-black border border-white/5 transition-all">IDLE</button>
+                </div>
+            </div>
+
+            <!-- LOG CONSOLE -->
+            <div class="glass p-6 rounded-3xl space-y-4">
+                <h3 class="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500"><i data-lucide="terminal" class="w-3 h-3"></i> Task Stream</h3>
+                <div id="log-list" class="space-y-2 h-[180px] overflow-y-auto font-mono text-[10px]">
+                    <!-- Logs -->
+                </div>
+            </div>
+        </div>
+
+        <!-- RIGHT PANEL: INVENTORY & CHAT -->
+        <div class="lg:col-span-3 space-y-6">
+             <!-- INVENTORY -->
+             <div class="glass p-5 rounded-3xl space-y-4 min-h-[450px]">
+                <div class="flex justify-between items-center">
+                    <h3 class="text-[10px] font-black uppercase tracking-widest text-slate-500">Storage</h3>
+                    <span id="inv-count" class="text-[9px] text-slate-600">0 Items</span>
+                </div>
+                <div id="inv-grid" class="grid grid-cols-3 gap-2">
+                    <!-- Items -->
+                </div>
+            </div>
+
+            <!-- CHAT RELAY -->
+            <div class="glass p-5 rounded-3xl space-y-3">
+                <div class="relative">
+                    <input type="text" id="chat-input" placeholder="Broadcasting..." class="w-full bg-white/5 border border-white/5 rounded-xl p-3 text-xs outline-none focus:border-indigo-500/50 pr-10">
+                    <button onclick="sendChat()" class="absolute right-2 top-2 text-indigo-400"><i data-lucide="send" class="w-5 h-5"></i></button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        lucide.createIcons();
+
+        function renderData(data) {
+            // Combat Alert
+            const body = document.getElementById('main-body');
+            const alert = document.getElementById('combat-banner');
+            if (data.isAttacked) {
+                body.classList.add('combat-glow');
+                alert.classList.remove('hidden');
+            } else {
+                body.classList.remove('combat-glow');
+                alert.classList.add('hidden');
+            }
+
+            if (!data.connected) {
+                document.getElementById('bot-name').innerText = 'OFFLINE';
+                document.getElementById('conn-dot').classList.remove('bg-emerald-500');
+                document.getElementById('conn-dot').classList.add('bg-red-500');
+                return;
+            }
+
+            // Connection
+            document.getElementById('bot-name').innerText = data.username.toUpperCase();
+            document.getElementById('conn-dot').classList.remove('bg-red-500');
+            document.getElementById('conn-dot').classList.add('bg-emerald-500');
+
+            // Vitals
+            document.getElementById('hp-text').innerText = `${data.hp}/20`;
+            document.getElementById('hp-line').style.width = `${(data.hp/20)*100}%`;
+            document.getElementById('food-text').innerText = `${data.food}/20`;
+            document.getElementById('food-line').style.width = `${(data.food/20)*100}%`;
+
+            // Config Pre-fill
+            if (document.activeElement.tagName !== 'INPUT') {
+                document.getElementById('host-input').value = data.config?.host || '';
+                document.getElementById('user-input').value = data.config?.username || '';
+            }
+
+            // Player Dropdown & Radar
+            const pSelect = document.getElementById('player-select');
+            const radar = document.getElementById('radar-list');
+            const curVal = pSelect.value;
+            
+            radar.innerHTML = '';
+            if (document.activeElement !== pSelect) {
+                pSelect.innerHTML = '<option value="">Nearby Mode</option>';
+            }
+
+            if (data.players) {
+                data.players.forEach(p => {
+                    // Radar item
+                    const rDiv = document.createElement('div');
+                    rDiv.className = 'flex justify-between items-center p-2 rounded-xl bg-white/5 text-[10px] font-bold border border-white/5';
+                    rDiv.innerHTML = `<span>${p.name}</span><span class="${p.dist < 10 ? 'text-emerald-400' : 'text-slate-500'} font-mono">${p.dist}m</span>`;
+                    radar.appendChild(rDiv);
+
+                    // Option
+                    if (document.activeElement !== pSelect && p.name !== data.username) {
+                        const opt = document.createElement('option');
+                        opt.value = p.name;
+                        opt.innerText = p.name;
+                        if (p.name === curVal) opt.selected = true;
+                        pSelect.appendChild(opt);
+                    }
+                });
+            }
+
+            // Behaviors
+            document.querySelectorAll('.mode-btn').forEach(btn => {
+                const active = btn.dataset.mode === data.mode;
+                btn.className = `mode-btn p-3 rounded-2xl text-[11px] font-black transition-all ${active ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white/5 text-slate-500 border border-white/5'}`;
+            });
+
+            // Logs
+            const logBox = document.getElementById('log-list');
+            if (data.logs) {
+                const currentLogCount = logBox.children.length;
+                if (data.logs.length !== currentLogCount) {
+                    logBox.innerHTML = '';
+                    data.logs.forEach(l => {
+                        const div = document.createElement('div');
+                        const color = l.type === 'error' ? 'text-red-400' : l.type === 'warn' ? 'text-yellow-400' : 'text-slate-400';
+                        div.className = `flex gap-2 ${color}`;
+                        div.innerHTML = `<span class="opacity-30 px-1 border border-white/10 rounded">${l.time.split(',')[1]?.trim() || ''}</span><span>${l.msg}</span>`;
+                        logBox.appendChild(div);
+                    });
+                    logBox.scrollTop = logBox.scrollHeight;
+                }
+            }
+
+            // Inventory
+            const inv = document.getElementById('inv-grid');
+            inv.innerHTML = '';
+            document.getElementById('inv-count').innerText = `${data.inventory.length} Slots Used`;
+            data.inventory.forEach(item => {
+                const btn = document.createElement('div');
+                btn.className = 'group relative glass p-2 rounded-xl text-center hover:border-red-500/50 transition-all';
+                btn.innerHTML = `
+                    <div class="text-[8px] font-black text-indigo-400 leading-none">${item.count}X</div>
+                    <div class="text-[8px] text-slate-500 truncate uppercase mt-1">${item.name.replace(/_/g, ' ')}</div>
+                    <button onclick="dropItem('${item.name}')" class="absolute -top-1 -right-1 hidden group-hover:flex bg-red-600 p-1 rounded-full"><i data-lucide="trash-2" class="w-2.5 h-2.5"></i></button>
+                `;
+                inv.appendChild(btn);
+            });
+            lucide.createIcons();
+        }
+
+        const source = new EventSource('/api/events');
+        source.onmessage = (e) => renderData(JSON.parse(e.data));
+
+        async function saveConfig() {
+            const host = document.getElementById('host-input').value;
+            const username = document.getElementById('user-input').value;
+            await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({host, username}) });
+        }
+
+        async function triggerAction(action) {
+            await fetch('/api/action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action}) });
+        }
+
+        async function dropItem(name) {
+            await fetch('/api/drop', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name}) });
+        }
+
+        document.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.onclick = async () => {
+                const mode = btn.dataset.mode;
+                const owner = document.getElementById('player-select').value;
+                await fetch('/api/mode', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode, owner}) });
+            };
+        });
+
+        async function sendChat() {
+            const input = document.getElementById('chat-input');
+            if(!input.value) return;
+            await fetch('/api/chat', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message: input.value}) });
+            input.value = '';
+        }
+        document.getElementById('chat-input').onkeydown = (e) => (e.key === 'Enter') && sendChat();
+    </script>
+</body>
+</html>

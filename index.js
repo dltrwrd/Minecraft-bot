@@ -8,16 +8,16 @@ const Vec3 = require('vec3').Vec3 || require('vec3');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { GoalNear, GoalFollow } = goals;
 const pvp = require('mineflayer-pvp');
-const autoeat = require('mineflayer-auto-eat');
+const autoeat = require('mineflayer-auto-eat').loader;
 const { plugin: collectBlock } = require('mineflayer-collectblock');
 
 // ─────────────────────────────────────────
 //  CONFIG  (override via environment vars)
 // ─────────────────────────────────────────
-const CONFIG = {
-  MC_HOST: process.env.MC_HOST || 'your-server-ip',
+let CONFIG = {
+  MC_HOST: process.env.MC_HOST || '',
   MC_PORT: parseInt(process.env.MC_PORT) || 25565,
-  MC_USERNAME: process.env.MC_USERNAME || 'KeepAliveBot',
+  MC_USERNAME: process.env.MC_USERNAME || 'MekaSMP',
   MC_VERSION: process.env.MC_VERSION || '1.20.1',
   MC_AUTH: process.env.MC_AUTH || 'offline',
   RENDER_URL: process.env.RENDER_URL || '',
@@ -43,7 +43,11 @@ const COLORS = {
 function log(type, msg) {
   const ts = new Date().toLocaleString('en-PH', { timeZone: 'Asia/Manila' });
   const tag = `[${type.toUpperCase()}]`.padEnd(10);
-  console.log(`${COLORS[type] || ''}${ts}  ${tag}  ${msg}${RESET}`);
+  const fullMsg = `${ts}  ${tag}  ${msg}`;
+  console.log(`${COLORS[type] || ''}${fullMsg}${RESET}`);
+  
+  recentLogs.push({ type, msg, time: ts });
+  if (recentLogs.length > 15) recentLogs.shift();
 }
 
 // ─────────────────────────────────────────
@@ -58,6 +62,9 @@ let botStartTime = null;
 let watchdogTimer = null;
 let botMode = 'AUTONOMOUS';
 let companionOwner = null;
+let recentLogs = [];
+let isAttacked = false;
+let attackTimeout = null;
 let isBusy = false;
 
 // ─────────────────────────────────────────
@@ -209,7 +216,11 @@ const PLAYER_ACTIONS = [
                      await new Promise(r => setTimeout(r, 500));
                      tableBlock = b.findBlock({ matching: blk => blk.name === 'crafting_table', maxDistance: 4 });
                   }
-               } catch (e) { log('error', `Placement failed: ${e.message}`); }
+               } catch (e) { 
+                  log('error', `Placement failed: ${e.message}`); 
+                  // Add a cooldown if placement fails
+                  await new Promise(r => setTimeout(r, 2000));
+               }
                isBusy = false;
             }
          } else {
@@ -438,7 +449,7 @@ function createBot() {
     const plugins = [
       { name: 'Pathfinder', fn: pathfinder },
       { name: 'PvP', fn: pvp.plugin },
-      { name: 'Auto-Eat', fn: autoeat.loader || autoeat },
+      { name: 'Auto-Eat', fn: autoeat },
       { name: 'CollectBlock', fn: collectBlock },
     ];
 
@@ -467,8 +478,8 @@ function createBot() {
     reconnectCount = 0;
     log('success', `✅ Bot spawned! Connected as ${bot.username}`);
 
-    if (bot.autoeat) {
-      bot.autoeat.options = {
+    if (bot.autoEat) {
+      bot.autoEat.options = {
         priority: 'foodPoints',
         startAt: 14,
         bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato'],
@@ -500,6 +511,12 @@ function createBot() {
   });
 
   bot.on('entityHurt', (entity) => {
+    if (entity === bot.entity) {
+      isAttacked = true;
+      if (attackTimeout) clearTimeout(attackTimeout);
+      attackTimeout = setTimeout(() => isAttacked = false, 5000);
+    }
+
     const isMaster = (entity.type === 'player' && entity.username === companionOwner && botMode === 'COMPANION');
     const player = bot.players[companionOwner]?.entity;
     
@@ -578,42 +595,8 @@ function createBot() {
 
   bot.on('chat', (username, message) => {
     if (username === bot.username) return;
-
-    if (message === '!follow') {
-      botMode = 'FOLLOW';
-      const player = bot.players[username]?.entity;
-      if (!player) return bot.chat("I can't see you!");
-      bot.chat(`Okay, I'm following you ${username}!`);
-      const movements = new Movements(bot);
-      movements.canOpenDoors = true;
-      movements.allowParkour = true;
-      movements.allowSprinting = true;
-      bot.pathfinder.setMovements(movements);
-      bot.pathfinder.setGoal(new GoalFollow(player, 2));
-    } else if (message === '!companion') {
-      botMode = 'COMPANION';
-      companionOwner = username;
-      const player = bot.players[username]?.entity;
-      if (!player) return bot.chat("I can't see you! Come closer to me.");
-      bot.chat(`I'm ready, Master ${username}! I'm your bodyguard now. I'll follow you and retaliate if someone messes with you!`);
-      const movements = new Movements(bot);
-      movements.canOpenDoors = true;
-      movements.allowParkour = true;
-      movements.allowSprinting = true;
-      bot.pathfinder.setMovements(movements);
-      bot.pathfinder.setGoal(new GoalFollow(player, 2));
-    } else if (message === '!stop') {
-      botMode = 'AUTONOMOUS';
-      companionOwner = null;
-      isBusy = false;
-      if (bot.pvp) bot.pvp.stop();
-      bot.pathfinder.setGoal(null);
-      bot.chat("Got it, I'll stop now. Returning to Autonomous mode!");
-      log('info', '🛑 Bot task stopped manually. Returning to AUTONOMOUS behavior.');
-    } else if (message === '!inventory') {
-      const items = bot.inventory.items().map(i => `${i.count}x ${i.name}`).join(', ');
-      bot.chat(items ? `My inventory: ${items}` : "I don't have any items.");
-    }
+    // Note: In-game commands (!follow, etc.) have been moved to the Web Control Panel
+    log('info', `[CHAT] ${username}: ${message}`);
   });
   
   bot.on('playerLeft', (player) => {
@@ -658,14 +641,158 @@ function scheduleReconnect() {
 }
 
 const app = express();
-app.get('/', (req, res) => {
-  res.json({ status: 'running', bot: { connected: isConnected, username: CONFIG.MC_USERNAME } });
+app.use(express.json());
+app.use(express.static('public'));
+
+app.get('/api/status', (req, res) => {
+  if (!bot || !isConnected) return res.json({ connected: false });
+  const items = bot.inventory.items().map(i => ({ name: i.name, count: i.count }));
+  res.json({
+    connected: true,
+    username: bot.username,
+    hp: Math.round(bot.health),
+    food: Math.round(bot.food),
+    mode: botMode,
+    pos: bot.entity?.position,
+    inventory: items,
+    owner: companionOwner,
+    players: Object.keys(bot.players || {}),
+    config: { host: CONFIG.MC_HOST, port: CONFIG.MC_PORT, username: CONFIG.MC_USERNAME }
+  });
 });
+
+app.get('/api/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const sendUpdate = () => {
+    if (!bot || !isConnected) {
+      res.write(`data: ${JSON.stringify({ connected: false })}\n\n`);
+      return;
+    }
+    const items = bot.inventory.items().map(i => ({ name: i.name, count: i.count }));
+    const data = {
+      connected: true,
+      username: bot.username,
+      hp: Math.round(bot.health),
+      food: Math.round(bot.food),
+      mode: botMode,
+      isAttacked,
+      pos: bot.entity?.position,
+      inventory: items,
+      players: Object.keys(bot.players || {}).map(name => ({
+         name,
+         dist: bot.entity?.position.distanceTo(bot.players[name]?.entity?.position || bot.entity.position).toFixed(1)
+      })),
+      logs: recentLogs,
+      config: { host: CONFIG.MC_HOST, port: CONFIG.MC_PORT, username: CONFIG.MC_USERNAME }
+    };
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const interval = setInterval(sendUpdate, 1000);
+  req.on('close', () => clearInterval(interval));
+});
+
+app.post('/api/drop', (req, res) => {
+  const { name } = req.body;
+  if (!bot || !isConnected) return res.status(400).json({ error: 'Offline' });
+  const item = bot.inventory.items().find(i => i.name === name);
+  if (item) {
+    bot.tossStack(item);
+    log('info', `🗑️ Web Control: Dropped ${item.name} (${item.count})`);
+    return res.json({ success: true });
+  }
+  res.status(404).json({ error: 'Item not found' });
+});
+
+app.post('/api/action', (req, res) => {
+  const { action } = req.body;
+  if (!bot || !isConnected) return res.status(400).json({ error: 'Offline' });
+  
+  if (action === 'eat') {
+     if (bot.autoEat) {
+        bot.autoEat.eat();
+        log('info', '🍔 Web Control: Manual eat triggered.');
+     } else {
+        log('warn', '🍔 Web Control: Auto-eat plugin not ready.');
+     }
+  } else if (action === 'mine_cobble') {
+     botMode = 'AUTONOMOUS'; // Auto logic will prioritize mining if table/pickaxe sorted
+     log('info', '⛏️ Web Control: Prioritizing resource gathering.');
+  } else if (action === 'stop_path') {
+     bot.pathfinder.setGoal(null);
+     log('warn', '🛑 Web Control: Stopped all pathfinding.');
+  }
+  res.json({ success: true });
+});
+
+app.post('/api/config', (req, res) => {
+  const { host, port, username, owner, version } = req.body;
+  if (host) CONFIG.MC_HOST = host;
+  if (port) CONFIG.MC_PORT = parseInt(port);
+  if (username) CONFIG.MC_USERNAME = username;
+  if (owner) CONFIG.MC_OWNER = owner;
+  if (version) CONFIG.MC_VERSION = version;
+  
+  log('info', `🌐 Web Control: Configuration updated. Reconnecting...`);
+  scheduleReconnect(100); // Immediate reconnect with new config
+  res.json({ success: true, config: CONFIG });
+});
+
+app.post('/api/mode', (req, res) => {
+  const { mode, owner } = req.body;
+  if (['AUTONOMOUS', 'IDLE', 'COMPANION', 'FOLLOW'].includes(mode)) {
+    botMode = mode;
+    const targetOwner = owner || CONFIG.MC_OWNER;
+    if (targetOwner) companionOwner = targetOwner;
+    
+    if (bot.pathfinder) {
+      bot.pathfinder.setGoal(null);
+      if ((mode === 'FOLLOW' || mode === 'COMPANION') && targetOwner) {
+         const player = bot.players[targetOwner]?.entity;
+         if (player) {
+            const movements = new Movements(bot);
+            movements.canOpenDoors = true;
+            bot.pathfinder.setMovements(movements);
+            bot.pathfinder.setGoal(new GoalFollow(player, 2));
+         }
+      }
+    }
+    
+    log('info', `🌐 Web Control: Mode changed to ${mode} (Owner: ${companionOwner || 'None'})`);
+    return res.json({ success: true, mode });
+  }
+  res.status(400).json({ error: 'Invalid mode' });
+});
+
+app.post('/api/chat', (req, res) => {
+  const { message } = req.body;
+  if (bot && isConnected && message) {
+    bot.chat(message);
+    return res.json({ success: true });
+  }
+  res.status(400).json({ error: 'Bot not ready' });
+});
+
+app.post('/api/reconnect', (req, res) => {
+  scheduleReconnect();
+  res.json({ success: true });
+});
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 app.get('/health', (req, res) => res.status(200).send('OK'));
+
 app.listen(CONFIG.PORT, () => {
   log('success', `🌐 HTTP server listening on port ${CONFIG.PORT}`);
   startSelfPinger();
-  createBot();
+  if (CONFIG.MC_HOST) createBot();
+  else log('warn', '📌 No MC_HOST set. Bot is waiting for configuration via web...');
 });
 
 function startSelfPinger() {
