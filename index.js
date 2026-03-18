@@ -4,6 +4,10 @@ const express = require('express');
 const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
+const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
+const GoalNear = goals.GoalNear;
+const pvp = require('mineflayer-pvp');
+const autoeat = require('mineflayer-auto-eat');
 
 // ─────────────────────────────────────────
 //  CONFIG  (override via environment vars)
@@ -28,14 +32,8 @@ const CONFIG = {
   // Reconnect delay (ms)
   RECONNECT_DELAY_MS: parseInt(process.env.RECONNECT_DELAY_MS) || 5000,
 
-  // Anti-AFK interval (ms)
-  AFK_INTERVAL_MS: parseInt(process.env.AFK_INTERVAL_MS) || 30 * 1000, // every 30s
-
-  // Reconnect delay (ms)
-  RECONNECT_DELAY_MS: parseInt(process.env.RECONNECT_DELAY_MS) || 5000,
-
-  // Anti-AFK interval (ms)
-  AFK_INTERVAL_MS: parseInt(process.env.AFK_INTERVAL_MS) || 30 * 1000, // every 30s
+  // Behavior interval (ms)
+  AFK_INTERVAL_MS: parseInt(process.env.AFK_INTERVAL_MS) || 1000,
 };
 
 // ─────────────────────────────────────────
@@ -71,56 +69,87 @@ let watchdogTimer = null; // Renamed to watchdogTimer and moved to outer scope
 // ─────────────────────────────────────────
 //  ANTI-AFK
 // ─────────────────────────────────────────
-const AFK_ACTIONS = [
+// Actions for mimicking a real player
+const PLAYER_ACTIONS = [
   // Jump
   b => {
-    b.setControlState('jump', true);
-    setTimeout(() => b.setControlState('jump', false), 500);
-    // log("afk", "Anti-AFK: jumped");
+    if (!b.pathfinder.isMoving() && !b.pvp?.target) {
+      b.setControlState('jump', true);
+      setTimeout(() => { if (b) b.setControlState('jump', false); }, 500);
+    }
   },
-  // Spin left
+  // Swing arm (like mining/punching)
   b => {
-    b.look(b.entity.yaw + Math.PI / 4, b.entity.pitch, false);
-    // log("afk", "Anti-AFK: looked around");
+    if (!b.pvp?.target) b.swingArm('right');
   },
-  // Spin right
+  // Look at nearest player
   b => {
-    b.look(b.entity.yaw - Math.PI / 4, b.entity.pitch, false);
-    // log("afk", "Anti-AFK: looked around");
+    if (b.pvp?.target) return;
+    const filter = (e) => (e.type === 'player' || e.type === 'mob') && e.id !== b.entity.id && e.position.distanceTo(b.entity.position) < 16;
+    const target = b.nearestEntity(filter);
+    if (target) {
+      b.lookAt(target.position.offset(0, target.height, 0));
+    }
   },
-  // Sneak toggle
+  // Toggle Sneak (fast)
   b => {
-    b.setControlState('sneak', true);
-    setTimeout(() => b.setControlState('sneak', false), 600);
-    // log("afk", "Anti-AFK: sneaked");
+    if (!b.pvp?.target) {
+      b.setControlState('sneak', true);
+      setTimeout(() => { if (b) b.setControlState('sneak', false); }, 200);
+    }
   },
-  // Random small walk
+  // Wander to a random location nearby
   b => {
-    const dirs = ['forward', 'back', 'left', 'right'];
-    const dir = dirs[Math.floor(Math.random() * dirs.length)];
-    b.setControlState(dir, true);
-    setTimeout(() => b.setControlState(dir, false), 400 + Math.random() * 300);
-    // log("afk", `Anti-AFK: moved (${dir})`);
+    if (b.pathfinder.isMoving() || b.pvp?.target) return;
+    const { x, y, z } = b.entity.position;
+    const randomPos = {
+      x: x + Math.floor(Math.random() * 10 - 5),
+      y: y,
+      z: z + Math.floor(Math.random() * 10 - 5)
+    };
+    const movements = new Movements(b);
+    b.pathfinder.setMovements(movements);
+    b.pathfinder.setGoal(new GoalNear(randomPos.x, randomPos.y, randomPos.z, 1));
+  },
+  // Pick up items (Looting)
+  b => {
+    if (b.pathfinder.isMoving() || b.pvp?.target) return;
+    const filter = (e) => e.type === 'item' && e.position.distanceTo(b.entity.position) < 8;
+    const item = b.nearestEntity(filter);
+    if (item) {
+      const movements = new Movements(b);
+      b.pathfinder.setMovements(movements);
+      b.pathfinder.setGoal(new GoalNear(item.position.x, item.position.y, item.position.z, 0.5));
+    }
   },
 ];
 
+function triggerRandomBehavior() {
+  if (!bot || !isConnected) return;
+  const action = PLAYER_ACTIONS[Math.floor(Math.random() * PLAYER_ACTIONS.length)];
+  try {
+    action(bot);
+  } catch (e) {
+    /* ignore mid-reconnect errors */
+  }
+}
+
 function startAntiAFK() {
   stopAntiAFK();
-  afkTimer = setInterval(() => {
-    if (!bot || !isConnected) return;
-    const action = AFK_ACTIONS[Math.floor(Math.random() * AFK_ACTIONS.length)];
-    try {
-      action(bot);
-    } catch (e) {
-      /* ignore mid-disconnect errors */
-    }
-  }, CONFIG.AFK_INTERVAL_MS);
-  // log("afk", `Anti-AFK started (every ${CONFIG.AFK_INTERVAL_MS / 1000}s)`);
+
+  function loop() {
+    triggerRandomBehavior();
+    // Add 0-500ms randomness so it's not a perfect mechanical heartbeat
+    const nextTick = CONFIG.AFK_INTERVAL_MS + Math.floor(Math.random() * 500);
+    afkTimer = setTimeout(loop, nextTick);
+  }
+
+  loop();
 }
 
 function stopAntiAFK() {
   if (afkTimer) {
-    clearInterval(afkTimer);
+    clearTimeout(afkTimer);
     afkTimer = null;
   }
 }
@@ -153,8 +182,22 @@ function createBot() {
       username: CONFIG.MC_USERNAME,
       version: CONFIG.MC_VERSION,
       auth: CONFIG.MC_AUTH,
-      checkTimeoutInterval: 60000,
       hideErrors: false,
+    });
+
+    // Proper way to load plugins with safety
+    const plugins = [
+      { name: 'Pathfinder', fn: pathfinder },
+      { name: 'PvP', fn: pvp.plugin },
+      { name: 'Auto-Eat', fn: autoeat.loader || autoeat }
+    ];
+
+    plugins.forEach(p => {
+      if (typeof p.fn === 'function') {
+        bot.loadPlugin(p.fn);
+      } else {
+        log('error', `Failed to load ${p.name}: plugin is not a function (type: ${typeof p.fn})`);
+      }
     });
 
     // Watchdog: If nothing happens for 45s, force a reconnect
@@ -180,7 +223,82 @@ function createBot() {
     botStartTime = Date.now();
     reconnectCount = 0;
     log('success', `✅ Bot spawned! Connected to ${CONFIG.MC_HOST}:${CONFIG.MC_PORT}`);
+
+    // Auto-eat config
+    if (bot.autoeat) {
+      bot.autoeat.options = {
+        priority: 'foodPoints',
+        startAt: 14,
+        bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato']
+      };
+    }
+
     startAntiAFK();
+  });
+
+  // ── SMART REVENGE (Combat) ──
+  bot.on('entityHurt', (entity) => {
+    if (entity !== bot.entity) return;
+
+    const entities = bot.entities;
+    const suspects = [];
+
+    for (const id in entities) {
+      const e = entities[id];
+      if (e.id === bot.entity.id) continue;
+      
+      // Catch all types of mobs/entities that aren't players
+      const isMob = (e.type === 'mob' || e.type === 'hostile' || e.type === 'passive');
+      const isPlayer = (e.type === 'player');
+
+      if (!isMob && !isPlayer) continue;
+
+      const dist = e.position.distanceTo(bot.entity.position);
+      if (dist > 30) continue; // Broad search for archers/mobs
+
+      // Calculate angle/look-at
+      const dx = bot.entity.position.x - e.position.x;
+      const dz = bot.entity.position.z - e.position.z;
+      const angleTowardBot = Math.atan2(-dx, -dz);
+      let diff = Math.abs(angleTowardBot - e.yaw) % (Math.PI * 2);
+      if (diff > Math.PI) diff = Math.PI * 2 - diff;
+
+      // DETECTION RULES:
+      if (isMob) {
+        // Any mob within 30 blocks is a suspect (safe over-detection)
+        suspects.push({ entity: e, dist: dist, type: 'mob' });
+      } else if (isPlayer && dist < 3 && diff < 0.2) {
+        // Players must be NEAR and STARING directly (0.2 rad = ~11 deg)
+        suspects.push({ entity: e, dist: dist, type: 'player' });
+      }
+    }
+
+    if (suspects.length > 0 && !bot.pvp.target) {
+      // PRIORITY: MOBS > PLAYERS
+      const mobs = suspects.filter(s => s.type === 'mob').sort((a,b) => a.dist - b.dist);
+      const players = suspects.filter(s => s.type === 'player').sort((a,b) => a.dist - b.dist);
+
+      let target = null;
+      if (mobs.length > 0) {
+        target = mobs[0].entity; // If a mob is anywhere nearby, it's the perp
+      } else if (players.length > 0) {
+        target = players[0].entity; // Only if NO mobs are within 30 blocks
+      }
+
+      if (target) {
+        const name = target.username || target.name || 'Unknown';
+        log('warn', `⚔️ RESBAK MODE: Detected ${name} (${target.type}) as the attacker. Babanatan na!`);
+        bot.pvp.attack(target);
+      }
+    }
+  });
+
+  bot.on('death', () => {
+    if (bot.pvp?.target) bot.pvp.stop();
+  });
+
+  bot.on('stoppedAttacking', () => {
+    log('info', '🏳️ Target gone or defeated. Combat stopped.');
   });
 
   // Skip chat/message listeners (no chat logs needed)
