@@ -4,6 +4,7 @@ const express = require('express');
 const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
+const Vec3 = require('vec3').Vec3 || require('vec3');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { GoalNear, GoalFollow } = goals;
 const pvp = require('mineflayer-pvp');
@@ -24,6 +25,7 @@ const CONFIG = {
   PORT: parseInt(process.env.PORT) || 3000,
   RECONNECT_DELAY_MS: parseInt(process.env.RECONNECT_DELAY_MS) || 5000,
   AFK_INTERVAL_MS: parseInt(process.env.AFK_INTERVAL_MS) || 30000,
+  MC_OWNER: process.env.MC_OWNER || '',
 };
 
 // ─────────────────────────────────────────
@@ -62,151 +64,338 @@ let isBusy = false;
 //  ANTI-AFK BEHAVIORS
 // ─────────────────────────────────────────
 const PLAYER_ACTIONS = [
-  // Jump
-  b => {
+  // idleAction: Jump
+  Object.assign(b => {
     if (!b.pathfinder.isMoving() && !b.pvp?.target) {
       b.setControlState('jump', true);
       setTimeout(() => { if (b) b.setControlState('jump', false); }, 500);
     }
-  },
-  // Swing arm
-  b => {
+  }, { taskName: 'idleAction' }),
+
+  // idleAction: Swing arm
+  Object.assign(b => {
     if (!b.pvp?.target) b.swingArm('right');
-  },
-  // Look at entity
-  b => {
+  }, { taskName: 'idleAction' }),
+
+  // idleAction: Look at entity
+  Object.assign(b => {
     if (b.pvp?.target) return;
     const filter = e => (e.type === 'player' || e.type === 'mob') && e.id !== b.entity.id && e.position.distanceTo(b.entity.position) < 16;
     const target = b.nearestEntity(filter);
     if (target) b.lookAt(target.position.offset(0, target.height, 0));
-  },
-  // Sneak
-  b => {
+  }, { taskName: 'idleAction' }),
+
+  // idleAction: Sneak
+  Object.assign(b => {
     if (!b.pvp?.target) {
       b.setControlState('sneak', true);
       setTimeout(() => { if (b) b.setControlState('sneak', false); }, 200);
     }
-  },
-  // Follow/Companion logic: Disable Wander if not Autonomous
-  b => {
-    if (botMode !== 'AUTONOMOUS' || b.pathfinder.isMoving() || b.pvp?.target) return;
+  }, { taskName: 'idleAction' }),
+
+  // wanderAction: Wander
+  Object.assign(b => {
+    if (botMode !== 'AUTONOMOUS' || b.pathfinder.isMoving() || b.pvp?.target) return false;
     const { x, y, z } = b.entity.position;
     const randomPos = {
-      x: x + Math.floor(Math.random() * 10 - 5),
+      x: x + Math.floor(Math.random() * 20 - 10),
       y: y,
-      z: z + Math.floor(Math.random() * 10 - 5),
+      z: z + Math.floor(Math.random() * 20 - 10),
     };
     const movements = new Movements(b);
     movements.canOpenDoors = true;
     movements.allowParkour = true;
     movements.allowSprinting = true;
     b.pathfinder.setMovements(movements);
-    b.pathfinder.setGoal(new GoalNear(randomPos.x, randomPos.y, randomPos.z, 1));
-  },
-  // 🏃 Maintain Follow/Companion (Persistence)
-  b => {
-    if (botMode === 'AUTONOMOUS' || b.pvp?.target || b.pathfinder.isMoving()) return;
-    
-    // Find the master entity manually to avoid stale references
-    const masterNick = companionOwner || Object.keys(b.players).find(k => k !== b.username); // Fallback to last chat user or someone else
-    const player = b.players[masterNick]?.entity;
-    
-    if (player) {
-      const dist = b.entity.position.distanceTo(player.position);
-      if (dist > 3) {
-        log('info', `👣 Master ${masterNick} is moving away... Following!`);
-        const movements = new Movements(b);
-        movements.canOpenDoors = true;
-        movements.allowParkour = true;
-        movements.allowSprinting = true;
-        b.pathfinder.setMovements(movements);
-        b.pathfinder.setGoal(new GoalFollow(player, 2));
-      }
-    }
-  },
-  // Gathering
-  async b => {
-    if (botMode !== 'AUTONOMOUS' || isBusy || b.pvp?.target) return;
-    const items = b.inventory.items();
-    const logs = items.filter(i => i.name.endsWith('_log')).length;
-    const cobble = items.filter(i => i.name === 'cobblestone').length;
-    const hasPickaxe = items.some(i => i.name.endsWith('_pickaxe'));
+    b.pathfinder.setGoal(new GoalNear(randomPos.x, randomPos.y, randomPos.z, 2));
+    return true;
+  }, { taskName: 'wanderAction' }),
 
-    if (logs < 4) {
+  // gatheringAction: Mining & Hunting
+  Object.assign(async b => {
+    if (botMode !== 'AUTONOMOUS' || isBusy || b.pvp?.target) return false;
+    const items = b.inventory.items();
+    const findCount = name => items.filter(i => i.name.includes(name)).reduce((sum, i) => sum + i.count, 0);
+    
+    const logs = findCount('_log');
+    const cobble = findCount('cobblestone');
+    const hasPickaxe = items.some(i => i.name.includes('pickaxe'));
+    const hasStonePickaxe = items.some(i => i.name.includes('stone_pickaxe'));
+
+    // WOOD
+    if (logs < 16) {
       const logBlock = b.findBlock({ matching: blk => blk.name.endsWith('_log'), maxDistance: 32 });
       if (logBlock) {
         isBusy = true;
         log('info', `🪓 Mining ${logBlock.name}...`);
         try { await b.collectBlock.collect(logBlock); } catch (e) {}
         isBusy = false;
-        return;
+        return true;
       }
     }
-    if (hasPickaxe && cobble < 16) {
-      const stoneBlock = b.findBlock({ matching: blk => blk.name === 'stone' || blk.name === 'cobblestone', maxDistance: 32 });
+
+    // STONE & IRON
+    if (hasPickaxe && cobble < 64) {
+      const stoneBlock = b.findBlock({ matching: blk => blk.name === 'stone' || blk.name === 'cobblestone' || (hasStonePickaxe && blk.name.includes('iron_ore')), maxDistance: 32 });
       if (stoneBlock) {
         isBusy = true;
-        log('info', '⛏️ Mining stone for upgrades...');
+        log('info', `⛏️ Mining ${stoneBlock.name} for resources...`);
         try { await b.collectBlock.collect(stoneBlock); } catch (e) {}
         isBusy = false;
-        return;
+        return true;
       }
     }
-  },
-  // Crafting & Equip
-  async b => {
-    if (isBusy || b.pvp?.target) return;
-    const items = b.inventory.items();
-    const hasItem = name => items.some(i => i.name.includes(name));
 
-    const autoCraft = async (targetName, count = 1) => {
-      if (hasItem(targetName)) return false;
+    // HUNTING (For leather & food)
+    const armorItems = items.filter(i => i.name.includes('helmet') || i.name.includes('chestplate') || i.name.includes('leggings') || i.name.includes('boots'));
+    const foodItems = items.filter(i => ['beef', 'porkchop', 'mutton', 'chicken', 'rabbit', 'cod', 'salmon'].some(f => i.name.includes(f)));
+    
+    // Hunt if we need armor OR if we're low on food
+    if (armorItems.length < 4 || foodItems.length < 5 || b.food < 15) {
+      const target = b.nearestEntity(e => e.type === 'mob' && (['cow', 'sheep', 'pig', 'chicken'].includes(e.name)) && e.position.distanceTo(b.entity.position) < 24);
+      if (target) {
+        log('info', `🥩 Hunting ${target.name} for food/leather...`);
+        b.lookAt(target.position.offset(0, target.height, 0));
+        
+        // Equip sword for hunting
+        const sword = items.find(i => i.name.includes('sword'));
+        if (sword) b.equip(sword, 'hand').catch(() => {});
+        
+        b.pvp.attack(target);
+        return true;
+      }
+    }
+    return false;
+  }, { taskName: 'gatheringAction' }),
+
+  // craftingAction: Crafting & Equip
+  Object.assign(async b => {
+    if (botMode !== 'AUTONOMOUS' || isBusy || b.pvp?.target) return false;
+    const items = b.inventory.items();
+    const findCount = name => items.filter(i => i.name.includes(name)).reduce((sum, i) => sum + i.count, 0);
+
+    const autoCraft = async (targetName, reqCount = 1) => {
+      const currentCount = findCount(targetName);
+      if (currentCount >= reqCount) return false;
+      
       const itemData = b.registry.itemsByName[targetName];
       if (!itemData) return false;
-      const recipes = b.recipesFor(itemData.id, null, count, null);
+
+      // 🔍 Find nearby crafting table
+      let tableBlock = b.findBlock({ matching: blk => blk.name === 'crafting_table', maxDistance: 4 });
+      
+      // 🛠️ Determine if this recipe REQUIRES a 3x3 table
+      const recipes2x2 = b.recipesFor(itemData.id, null, 1, null);
+      const needsTable = recipes2x2.length === 0;
+      
+      if (needsTable && !tableBlock) {
+         if (findCount('crafting_table') > 0) {
+            log('info', '🏗️ Placing crafting table for tools/armor...');
+            const ground = b.findBlock({ 
+              matching: blk => blk.name !== 'air' && blk.name !== 'water' && blk.name !== 'lava' && blk.boundingBox === 'block', 
+              maxDistance: 4 
+            });
+            if (ground && b.entity && b.entity.position) {
+               isBusy = true;
+               try {
+                  const tableItem = b.inventory.items().find(i => i.name === 'crafting_table');
+                  if (tableItem) {
+                     await b.equip(tableItem, 'hand');
+                     const faceVector = b.entity.position.clone();
+                     faceVector.x = 0; faceVector.y = 1; faceVector.z = 0;
+                     log('info', `🏗️ Placing table on ${ground.name} at ${ground.position}...`);
+                     await b.placeBlock(ground, faceVector); 
+                     // Wait a moment for server to sync
+                     await new Promise(r => setTimeout(r, 500));
+                     tableBlock = b.findBlock({ matching: blk => blk.name === 'crafting_table', maxDistance: 4 });
+                  }
+               } catch (e) { log('error', `Placement failed: ${e.message}`); }
+               isBusy = false;
+            }
+         } else {
+            return false;
+         }
+      }
+
+      const recipes = b.recipesFor(itemData.id, tableBlock, 1, null);
       if (recipes.length > 0) {
         log('success', `🛠️ Crafting ${targetName}...`);
-        try { await b.craft(recipes[0], count, null); return true; } catch (e) {}
+        try { 
+           await b.craft(recipes[0], 1, tableBlock); 
+           // 🧹 Pick up table after use to be resourceful
+           if (tableBlock) {
+              log('info', '🧹 Picking up crafting table...');
+              await b.collectBlock.collect(tableBlock);
+           }
+           return true; 
+        } catch (e) { log('error', `Crafting error: ${e.message}`); }
       }
       return false;
     };
 
-    await autoCraft('oak_planks', 4);
-    if (await autoCraft('crafting_table')) return;
-    if (await autoCraft('stick', 4)) return;
-    if (!hasItem('pickaxe')) {
-       if (await autoCraft('stone_pickaxe')) return;
-       if (await autoCraft('wooden_pickaxe')) return;
+    // 🪵 DYNAMIC WOOD PROCESSING (Any log to its planks)
+    const logItem = items.find(i => i.name.endsWith('_log'));
+    if (logItem) {
+      const plankName = logItem.name.replace('_log', '_planks');
+      if (findCount('_planks') < 24) if (await autoCraft(plankName, 24)) return true;
     }
-    if (!hasItem('sword')) {
-       if (await autoCraft('stone_sword')) return;
-       if (await autoCraft('wooden_sword')) return;
-    }
-    if (items.filter(i => i.name === 'cobblestone').length >= 8) if (await autoCraft('furnace')) return;
 
-    // Equip armor
-    const armorSlots = ['head', 'torso', 'legs', 'feet'];
-    for (const slot of armorSlots) {
-      const bestArmor = items.filter(i => i.name.includes('helmet') || i.name.includes('chestplate') || i.name.includes('leggings') || i.name.includes('boots'))
-                            .sort((a, b) => (b.value || 0) - (a.value || 0))[0];
-      if (bestArmor) b.equip(bestArmor, slot).catch(() => {});
+    if (await autoCraft('crafting_table', 1)) return true;
+    if (await autoCraft('stick', 16)) return true;
+    const hasPickaxe = items.some(i => i.name.includes('pickaxe'));
+    const hasSword = items.some(i => i.name.includes('sword'));
+    if (!hasPickaxe) {
+       if (await autoCraft('stone_pickaxe', 1)) return true;
+       if (await autoCraft('wooden_pickaxe', 1)) return true;
     }
-    const sword = items.filter(i => i.name.includes('sword')).sort((a,b) => (b.value || 0) - (a.value || 0))[0];
-    if (sword) b.equip(sword, 'hand').catch(() => {});
-  }
+    if (!hasSword) {
+       if (await autoCraft('stone_sword', 1)) return true;
+       if (await autoCraft('wooden_sword', 1)) return true;
+    }
+    if (findCount('cobblestone') >= 8 && findCount('furnace') === 0) if (await autoCraft('furnace', 1)) return true;
+
+    // 🛡️ SHIELD (1 Iron Ingot + 6 Planks)
+    if (findCount('iron_ingot') >= 1 && findCount('_planks') >= 6 && findCount('shield') === 0) {
+       if (await autoCraft('shield', 1)) return true;
+    }
+
+    // 🔬 SMELTING LOGIC (Simplified)
+    if (findCount('iron_ore') > 0 && findCount('iron_ingot') < 24) {
+       const furnace = b.findBlock({ matching: blk => blk.name === 'furnace', maxDistance: 4 });
+       if (furnace) {
+          log('info', '🔥 Using furnace to smelt iron...');
+          try {
+             const f = await b.openFurnace(furnace);
+             const ore = items.find(i => i.name.includes('iron_ore'));
+             const fuel = items.find(i => i.name.includes('planks') || i.name.includes('log') || i.name.includes('stick'));
+             if (ore && fuel) {
+                await f.putInput(ore.type, null, 1);
+                await f.putFuel(fuel.type, null, 1);
+                setTimeout(() => f.close(), 5000);
+                return true;
+             }
+          } catch(e) {}
+       } else if (findCount('furnace') > 0) {
+          // Place furnace
+          const ground = b.findBlock({ matching: blk => blk.name !== 'air' && blk.name !== 'water' && blk.boundingBox === 'block', maxDistance: 4 });
+          const furnaceItem = items.find(i => i.name === 'furnace');
+          if (ground && furnaceItem && b.entity && b.entity.position) { 
+             try {
+                isBusy = true;
+                await b.equip(furnaceItem, 'hand'); 
+                const faceVector = b.entity.position.clone();
+                faceVector.x = 0; faceVector.y = 1; faceVector.z = 0;
+                log('info', `🔥 Placing furnace on ${ground.name} at ${ground.position}...`);
+                await b.placeBlock(ground, faceVector);
+             } catch(e){ log('error', `Furnace placement failed: ${e.message}`); }
+             isBusy = false;
+             return true; 
+          }
+       }
+    }
+
+    const armorSets = [
+      ['iron_chestplate', 'iron_leggings', 'iron_helmet', 'iron_boots'],
+      ['leather_chestplate', 'leather_leggings', 'leather_helmet', 'leather_boots']
+    ];
+    for (const set of armorSets) {
+      for (const piece of set) {
+        if (findCount(piece) === 0) if (await autoCraft(piece, 1)) return true;
+      }
+    }
+
+    return false;
+  }, { taskName: 'craftingAction' })
 ];
 
 function triggerRandomBehavior() {
   if (!bot || !isConnected || isBusy) return;
-  const action = PLAYER_ACTIONS[Math.floor(Math.random() * PLAYER_ACTIONS.length)];
-  try { action(bot); } catch (e) {}
+
+  // 🛡️ TOP PRIORITY: GEAR CHECK (Runs every tick! Done before anything else)
+  // Ensure we are wearing the best gear and holding weapons
+  const items = bot.inventory.items();
+  const armorSlotsMap = {
+     'helmet': 'head',
+     'chestplate': 'torso',
+     'leggings': 'legs',
+     'boots': 'feet',
+     'shield': 'off-hand'
+  };
+  for (const [key, slot] of Object.entries(armorSlotsMap)) {
+     const best = items.filter(i => i.name.includes(key))
+                      .sort((a, b) => (b.value || 0) - (a.value || 0))[0];
+     if (best && (!bot.inventory.slots[slot === 'head' ? 5 : slot === 'torso' ? 6 : slot === 'legs' ? 7 : slot === 'feet' ? 8 : 45] || bot.inventory.slots[slot === 'head' ? 5 : slot === 'torso' ? 6 : slot === 'legs' ? 7 : slot === 'feet' ? 8 : 45].name !== best.name)) {
+        bot.equip(best, slot).catch(() => {});
+     }
+  }
+  const bestSword = items.filter(i => i.name.includes('sword')).sort((a,b) => (b.value || 0) - (a.value || 0))[0];
+  if (bestSword && (!bot.heldItem || bot.heldItem.name !== bestSword.name) && !isBusy) {
+     bot.equip(bestSword, 'hand').catch(() => {});
+  }
+
+  // 1️⃣ PRIORITY: FOLLOW MASTER
+  if (botMode !== 'AUTONOMOUS' && !bot.pvp?.target && !bot.pathfinder.isMoving()) {
+    const masterNick = companionOwner || Object.keys(bot.players).find(k => k !== bot.username);
+    const player = bot.players[masterNick]?.entity;
+
+    if (player) {
+      const dist = bot.entity.position.distanceTo(player.position);
+      if (dist > 3) {
+        log('info', `👣 Master ${masterNick} is far (${Math.round(dist)}m). Resuming follow!`);
+        const movements = new Movements(bot);
+        movements.canOpenDoors = true;
+        movements.allowParkour = true;
+        movements.allowSprinting = true;
+        bot.pathfinder.setMovements(movements);
+        bot.pathfinder.setGoal(new GoalFollow(player, 2));
+        return; 
+      }
+    } else if (companionOwner) {
+       log('warn', `🔍 Master ${companionOwner} lost! Looking for them...`);
+       bot.lookAt(bot.entity.position.offset(Math.random() * 10 - 5, 2, Math.random() * 10 - 5));
+    }
+  }
+
+  // 2️⃣ PRIORITY: COMBAT TARGET
+  if (bot.pvp?.target) return;
+
+  // 3️⃣ PRIORITY: CRAFTING
+  if (botMode === 'AUTONOMOUS') {
+    const craftAction = PLAYER_ACTIONS.find(p => p.taskName === 'craftingAction');
+    if (craftAction) {
+       const result = craftAction(bot);
+       if (result === true) return; 
+    }
+  }
+
+  // 4️⃣ PRIORITY: GATHERING
+  if (botMode === 'AUTONOMOUS') {
+    const gatherAction = PLAYER_ACTIONS.find(p => p.taskName === 'gatheringAction');
+    if (gatherAction) {
+       const result = gatherAction(bot);
+       if (result === true) return; 
+    }
+  }
+
+  // 5️⃣ PRIORITY: WANDER/IDLE
+  if (botMode === 'AUTONOMOUS' && !bot.pathfinder.isMoving() && Math.random() < 0.3) {
+    const wanderAction = PLAYER_ACTIONS.find(p => p.taskName === 'wanderAction');
+    if (wanderAction) wanderAction(bot);
+  }
+
+  // 6️⃣ FALLBACK: RANDOM IDLE
+  const idleActions = PLAYER_ACTIONS.filter(p => p.taskName === 'idleAction');
+  const action = idleActions[Math.floor(Math.random() * idleActions.length)];
+  if (action) action(bot);
 }
 
 function startAntiAFK() {
   stopAntiAFK();
   function loop() {
     triggerRandomBehavior();
-    afkTimer = setTimeout(loop, CONFIG.AFK_INTERVAL_MS + Math.floor(Math.random() * 500));
+    // Use faster interval if in COMPANION/FOLLOW mode
+    const interval = (botMode === 'AUTONOMOUS') ? CONFIG.AFK_INTERVAL_MS : Math.min(CONFIG.AFK_INTERVAL_MS, 2000);
+    afkTimer = setTimeout(loop, interval + Math.floor(Math.random() * 500));
   }
   loop();
 }
@@ -296,6 +485,20 @@ function createBot() {
     }, 2000); // 2 second wait
   });
 
+  bot.on('playerCollect', () => {
+    if (!isConnected) return;
+    // Trigger immediate gear check when items are picked up
+    const items = bot.inventory.items();
+    const armorSlotsMap = { 'helmet': 'head', 'chestplate': 'torso', 'leggings': 'legs', 'boots': 'feet', 'shield': 'off-hand' };
+    for (const [key, slot] of Object.entries(armorSlotsMap)) {
+       const best = items.filter(i => i.name.includes(key)).sort((a, b) => (b.value || 0) - (a.value || 0))[0];
+       const slotId = slot === 'head' ? 5 : slot === 'torso' ? 6 : slot === 'legs' ? 7 : slot === 'feet' ? 8 : 45;
+       if (best && (!bot.inventory.slots[slotId] || bot.inventory.slots[slotId].name !== best.name)) {
+          bot.equip(best, slot).catch(() => {});
+       }
+    }
+  });
+
   bot.on('entityHurt', (entity) => {
     const isMaster = (entity.type === 'player' && entity.username === companionOwner && botMode === 'COMPANION');
     const player = bot.players[companionOwner]?.entity;
@@ -329,7 +532,7 @@ function createBot() {
       if (!isCombatant) continue;
 
       const dist = e.position.distanceTo(bot.entity.position);
-      if (dist > 30) continue; 
+      if (dist > 32) continue; // Increased detection range
 
       const dx = bot.entity.position.x - e.position.x;
       const dz = bot.entity.position.z - e.position.z;
@@ -337,7 +540,8 @@ function createBot() {
       let diff = Math.abs(angleTowardBot - e.yaw) % (Math.PI * 2);
       if (diff > Math.PI) diff = Math.PI * 2 - diff;
 
-      if (e.type !== 'player' || (dist < 4 && diff < 0.3)) {
+      // Relaxed conditions: If it's a mob nearby, or a player within 8 blocks 
+      if (e.type !== 'player' || dist < 8) {
         suspects.push({ entity: e, dist: dist, type: e.type });
       }
     }
@@ -352,6 +556,19 @@ function createBot() {
       const victimStr = entity === bot.entity ? 'me' : 'my master';
       log('warn', `⚔️ RETALIATION MODE: Protecting ${victimStr}! Target: ${target.username || target.name}.`);
       bot.chat(`Retaliation mode! Do not touch ${victimStr}!`);
+      
+      // Stop anything we were doing!
+      isBusy = false;
+      if (bot.pathfinder) bot.pathfinder.setGoal(null);
+      if (bot.collectBlock) { try { bot.collectBlock.stop(); } catch (e) {} }
+
+      // Equip weapons immediately!
+      const items = bot.inventory.items();
+      const sword = items.find(i => i.name.includes('sword'));
+      const shield = items.find(i => i.name === 'shield');
+      if (sword) bot.equip(sword, 'hand').catch(() => {});
+      if (shield) bot.equip(shield, 'off-hand').catch(() => {});
+
       bot.pvp.attack(target);
     }
   });
