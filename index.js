@@ -97,6 +97,9 @@ const PLAYER_ACTIONS = [
       z: z + Math.floor(Math.random() * 10 - 5),
     };
     const movements = new Movements(b);
+    movements.canOpenDoors = true;
+    movements.allowParkour = true;
+    movements.allowSprinting = true;
     b.pathfinder.setMovements(movements);
     b.pathfinder.setGoal(new GoalNear(randomPos.x, randomPos.y, randomPos.z, 1));
   },
@@ -113,6 +116,9 @@ const PLAYER_ACTIONS = [
       if (dist > 3) {
         log('info', `👣 Master ${masterNick} is moving away... Following!`);
         const movements = new Movements(b);
+        movements.canOpenDoors = true;
+        movements.allowParkour = true;
+        movements.allowSprinting = true;
         b.pathfinder.setMovements(movements);
         b.pathfinder.setGoal(new GoalFollow(player, 2));
       }
@@ -333,8 +339,8 @@ function createBot() {
       });
       const target = targets[0].entity;
       const victimStr = entity === bot.entity ? 'me' : 'my master';
-      log('warn', `⚔️ RETALIATION MODE: Someone's hurting ${victimStr}! Target: ${target.username || target.name}.`);
-      bot.chat(`Retaliation mode! Don't you dare touch ${victimStr}!`);
+      log('warn', `⚔️ RETALIATION MODE: Protecting ${victimStr}! Target: ${target.username || target.name}.`);
+      bot.chat(`Retaliation mode! Do not touch ${victimStr}!`);
       bot.pvp.attack(target);
     }
   });
@@ -351,6 +357,9 @@ function createBot() {
       if (!player) return bot.chat("I can't see you!");
       bot.chat(`Okay, I'm following you ${username}!`);
       const movements = new Movements(bot);
+      movements.canOpenDoors = true;
+      movements.allowParkour = true;
+      movements.allowSprinting = true;
       bot.pathfinder.setMovements(movements);
       bot.pathfinder.setGoal(new GoalFollow(player, 2));
     } else if (message === '!companion') {
@@ -360,16 +369,32 @@ function createBot() {
       if (!player) return bot.chat("I can't see you! Come closer to me.");
       bot.chat(`I'm ready, Master ${username}! I'm your bodyguard now. I'll follow you and retaliate if someone messes with you!`);
       const movements = new Movements(bot);
+      movements.canOpenDoors = true;
+      movements.allowParkour = true;
+      movements.allowSprinting = true;
       bot.pathfinder.setMovements(movements);
       bot.pathfinder.setGoal(new GoalFollow(player, 2));
     } else if (message === '!stop') {
       botMode = 'AUTONOMOUS';
       companionOwner = null;
-      bot.chat("Got it, I'll stop now. I'm going to explore and find some gear!");
+      isBusy = false;
+      if (bot.pvp) bot.pvp.stop();
       bot.pathfinder.setGoal(null);
+      bot.chat("Got it, I'll stop now. Returning to Autonomous mode!");
+      log('info', '🛑 Bot task stopped manually. Returning to AUTONOMOUS behavior.');
     } else if (message === '!inventory') {
       const items = bot.inventory.items().map(i => `${i.count}x ${i.name}`).join(', ');
       bot.chat(items ? `My inventory: ${items}` : "I don't have any items.");
+    }
+  });
+  
+  bot.on('playerLeft', (player) => {
+    if (player.username === companionOwner) {
+      log('info', `Master ${companionOwner} left the server. Returning to AUTONOMOUS mode.`);
+      botMode = 'AUTONOMOUS';
+      companionOwner = null;
+      isBusy = false;
+      bot.pathfinder.setGoal(null);
     }
   });
 
