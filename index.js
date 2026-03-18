@@ -241,6 +241,9 @@ function createBot() {
       version: CONFIG.MC_VERSION,
       auth: CONFIG.MC_AUTH,
       hideErrors: false,
+      checkTimeoutInterval: 60000, // Increase timeout check
+      keepAlive: true,
+      viewDistance: 'tiny', // Lower data usage to avoid overload
     });
 
     const plugins = [
@@ -282,13 +285,15 @@ function createBot() {
         bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato'],
       };
     }
-    // Delay behavior start to avoid anti-bot kicks immediately after spawn
+    // Delay behavior start briefly to avoid kicks
     setTimeout(() => {
       if (isConnected) {
-        log('info', '🕒 Grace period ended. Starting autonomous behaviors...');
+        log('info', '🕒 Starting autonomous behaviors...');
+        bot.setControlState('jump', true); // Simple move to show we are alive
+        setTimeout(() => bot.setControlState('jump', false), 500);
         startAntiAFK();
       }
-    }, 10000); // 10 second wait
+    }, 2000); // 2 second wait
   });
 
   bot.on('entityHurt', (entity) => {
