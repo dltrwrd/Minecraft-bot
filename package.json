@@ -1,0 +1,20 @@
+{
+  "name": "minecraft-keepalive-bot",
+  "version": "1.0.0",
+  "description": "Minecraft Java bot to keep server alive — deployable on Render",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "express": "^4.18.2",
+    "mineflayer": "^4.23.0",
+    "node-fetch": "^2.7.0"
+  }
+}
