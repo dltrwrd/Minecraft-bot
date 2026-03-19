@@ -17,7 +17,7 @@ const { plugin: collectBlock } = require('mineflayer-collectblock');
 let CONFIG = {
   MC_HOST: process.env.MC_HOST || '',
   MC_PORT: parseInt(process.env.MC_PORT) || 25565,
-  MC_USERNAME: process.env.MC_USERNAME || 'MekaSMP',
+  MC_USERNAME: process.env.MC_USERNAME || 'EdgeRunner',
   MC_VERSION: process.env.MC_VERSION || '1.20.1',
   MC_AUTH: process.env.MC_AUTH || 'offline',
   RENDER_URL: process.env.RENDER_URL || '',
@@ -44,10 +44,19 @@ function log(type, msg) {
   const ts = new Date().toLocaleString('en-PH', { timeZone: 'Asia/Manila' });
   const tag = `[${type.toUpperCase()}]`.padEnd(10);
   const fullMsg = `${ts}  ${tag}  ${msg}`;
-  console.log(`${COLORS[type] || ''}${fullMsg}${RESET}`);
   
+  // 📝 Web Dashboard gets ALL logs
   recentLogs.push({ type, msg, time: ts });
-  if (recentLogs.length > 15) recentLogs.shift();
+  if (recentLogs.length > 50) recentLogs.shift();
+
+  // 🖥️ Terminal only gets ESSENTIAL logs (Spawn, Connect, Ping, Success, Error)
+  const isEssential = type === 'success' || type === 'error' || 
+                      msg.includes('Spawned') || msg.includes('Connected') || 
+                      msg.includes('server is up') || msg.includes('listening');
+                      
+  if (isEssential) {
+    console.log(`${COLORS[type] || ''}${fullMsg}${RESET}`);
+  }
 }
 
 // ─────────────────────────────────────────
@@ -279,11 +288,7 @@ const PLAYER_ACTIONS = [
         log('success', `🛠️ Crafting ${targetName}...`);
         try { 
            await b.craft(recipes[0], 1, tableBlock); 
-           // 🧹 Pick up table after use to be resourceful
-           if (tableBlock) {
-              log('info', '🧹 Picking up crafting table...');
-              await b.collectBlock.collect(tableBlock);
-           }
+           // 🧹 Only pick up if we placed it OR if we're done here
            return true; 
         } catch (e) { log('error', `Crafting error: ${e.message}`); }
       }
@@ -399,7 +404,34 @@ async function triggerRandomBehavior() {
     }
   }
 
-  // 2️⃣ PRIORITY: FOLLOW/COMPANION
+  // 2️⃣ PRIORITY: KILL MODE
+  if (botMode === 'KILL' && companionOwner) {
+    const target = bot.players[companionOwner]?.entity;
+    if (target) {
+       const dist = bot.entity.position.distanceTo(target.position);
+       if (dist > 3) {
+          if (!bot.pathfinder.isMoving()) {
+             log('info', `🎯 HUNTING: ${companionOwner} detected at ${Math.round(dist)}m. Closing in!`);
+             bot.pathfinder.setGoal(new GoalFollow(target, 2), true);
+          }
+       } else if (!bot.pvp?.target) {
+          log('warn', `⚔️ KILL PROTOCOL: Engaging ${companionOwner}!`);
+          // Equip sword for combat
+          const sword = items.find(i => i.name.includes('sword'));
+          if (sword) bot.equip(sword, 'hand').catch(() => {});
+          bot.pvp.attack(target);
+       }
+       return;
+    } else {
+       if (!bot.pathfinder.isMoving()) {
+          log('warn', `🔍 TARGET LOST: Searching for ${companionOwner}'s last known signal...`);
+          // Randomly look around to simulate searching
+          bot.lookAt(bot.entity.position.offset(Math.random()*10-5, 2, Math.random()*10-5));
+       }
+    }
+  }
+
+  // 3️⃣ PRIORITY: FOLLOW/COMPANION
   if (botMode !== 'AUTONOMOUS' && !bot.pvp?.target && !bot.pathfinder.isMoving()) {
     const masterNick = companionOwner || Object.keys(bot.players).find(k => k !== bot.username);
     const player = bot.players[masterNick]?.entity;
@@ -425,7 +457,24 @@ async function triggerRandomBehavior() {
   // 2️⃣ PRIORITY: COMBAT TARGET
   if (bot.pvp?.target) return;
 
-  // 3️⃣ PRIORITY: CRAFTING
+  // 3️⃣ PRIORITY: PROACTIVE DEFENSE (Attack hostiles within 4m)
+  if (botModules.pvp && !bot.pvp?.target) {
+     const hostile = bot.nearestEntity(e => 
+        (['zombie','skeleton','creeper','spider','enderman','witch','slime','phantom','drowned','husk','stray','hoglin','piglin','zoglin'].includes(e.name)) && 
+        e.position.distanceTo(bot.entity.position) < 4
+     );
+     if (hostile) {
+        log('warn', `⚔️ PROACTIVE DEFENSE: Detected ${hostile.name} nearby. Engaging!`);
+        isBusy = false; // Override busy state for combat
+        const items = bot.inventory.items();
+        const sword = items.find(i => i.name.includes('sword'));
+        if (sword) bot.equip(sword, 'hand').catch(() => {});
+        bot.pvp.attack(hostile);
+        return;
+     }
+  }
+
+  // 4️⃣ PRIORITY: CRAFTING
   if (botMode === 'AUTONOMOUS' && botModules.craft) {
     const craftAction = PLAYER_ACTIONS.find(p => p.taskName === 'craftingAction');
     if (craftAction) {
@@ -434,7 +483,7 @@ async function triggerRandomBehavior() {
     }
   }
 
-  // 4️⃣ PRIORITY: GATHERING (MINE & HUNT)
+  // 5️⃣ PRIORITY: GATHERING (MINE & HUNT)
   if (botMode === 'AUTONOMOUS' && (botModules.mine || botModules.hunt)) {
     const gatherAction = PLAYER_ACTIONS.find(p => p.taskName === 'gatheringAction');
     if (gatherAction) {
@@ -508,7 +557,8 @@ function createBot() {
       viewDistance: 'tiny', // Lower data usage to avoid overload
     });
 
-    bot.setMaxListeners(30);
+    bot.setMaxListeners(100);
+    bot.on('inject_allowed', () => { if (bot._client) bot._client.setMaxListeners(100); });
 
     const plugins = [
       { name: 'Pathfinder', fn: pathfinder },
@@ -520,6 +570,46 @@ function createBot() {
     plugins.forEach(p => {
       if (typeof p.fn === 'function') bot.loadPlugin(p.fn);
       else log('error', `Failed to load ${p.name}`);
+    });
+
+    // Tune PvP settings after plugin is loaded
+    if (bot.pvp) {
+      bot.pvp.moveSpeed = 1.3; // Much faster tracking
+      bot.pvp.attackRange = 4.2; // Optimized reach
+    }
+    
+    // 🤺 COMBAT FRENZY (Strafe & Criticals)
+    let strafeDir = 1;
+    let strafeTimer = 0;
+    
+    bot.on('physicsTick', () => {
+       if (!bot.pvp || !bot.pvp.target) {
+          bot.setControlState('sprint', false);
+          bot.setControlState('left', false);
+          bot.setControlState('right', false);
+          bot.setControlState('jump', false);
+          return;
+       }
+       
+       // Always sprint for knockback
+       bot.setControlState('sprint', true);
+       
+       // 🌪️ ZIG-ZAG STRAFE Logic
+       strafeTimer++;
+       if (strafeTimer > 10) {
+          strafeDir *= -1;
+          strafeTimer = 0;
+       }
+       bot.setControlState('left', strafeDir === 1);
+       bot.setControlState('right', strafeDir === -1);
+       
+       // ⚡ CRITICAL HIT LOGIC (Jump before strike)
+       const dist = bot.entity.position.distanceTo(bot.pvp.target.position);
+       if (dist < 4 && bot.entity.onGround) {
+          bot.setControlState('jump', true);
+       } else {
+          bot.setControlState('jump', false);
+       }
     });
 
     watchdogTimer = setTimeout(() => {
@@ -595,7 +685,6 @@ function createBot() {
           let diff = Math.abs(angle - player.yaw) % (Math.PI * 2);
           if (diff > Math.PI) diff = Math.PI * 2 - diff;
           if (diff < 0.6 && !bot.pvp?.target) {
-             bot.chat(`Sure Master, I'll help you with ${entity.username || entity.name}!`);
              bot.pvp.attack(entity);
              return;
           }
@@ -638,21 +727,21 @@ function createBot() {
       const target = targets[0].entity;
       const victimStr = entity === bot.entity ? 'me' : 'my master';
       log('warn', `⚔️ RETALIATION MODE: Protecting ${victimStr}! Target: ${target.username || target.name}.`);
-      bot.chat(`Retaliation mode! Do not touch ${victimStr}!`);
       
       // Stop anything we were doing!
       isBusy = false;
       if (bot.pathfinder) bot.pathfinder.setGoal(null);
       if (bot.collectBlock) { try { bot.collectBlock.stop(); } catch (e) {} }
 
-      // Equip weapons immediately!
-      const items = bot.inventory.items();
-      const sword = items.find(i => i.name.includes('sword'));
-      const shield = items.find(i => i.name === 'shield');
-      if (sword) bot.equip(sword, 'hand').catch(() => {});
-      if (shield) bot.equip(shield, 'off-hand').catch(() => {});
-
-      bot.pvp.attack(target);
+       // Equip GLADIATOR GEAR immediately!
+       const items = bot.inventory.items();
+       const sword = items.find(i => i.name.includes('sword') || i.name.includes('axe'));
+       const shield = items.find(i => i.name === 'shield');
+       if (sword) bot.equip(sword, 'hand').catch(() => {});
+       if (shield) bot.equip(shield, 'off-hand').catch(() => {});
+       
+       log('warn', `🤺 COMBAT FRENZY: Engaging target!`);
+       bot.pvp.attack(target);
     }
   });
 
@@ -730,13 +819,13 @@ app.get('/api/status', (req, res) => {
        isDay: bot.time?.timeOfDay < 13000
     },
     entities: Object.values(bot.entities)
-      .filter(e => e.type !== 'object' && e.id !== bot.entity?.id && e.position.distanceTo(bot.entity.position) < 32)
+      .filter(e => e.type === 'player' && e.id !== bot.entity?.id && e.position.distanceTo(bot.entity.position) < 32)
       .map(e => ({
          name: e.displayName || e.username || e.name,
          type: e.type,
-         pos: e.position,
-         dist: e.position.distanceTo(bot.entity.position).toFixed(1),
-         isHostile: (['zombie','skeleton','creeper','spider','enderman','witch','slime','phantom','drowned','husk','stray','hoglin','piglin','zoglin'].includes(e.name))
+         pos: { x: Math.round(e.position.x), y: Math.round(e.position.y), z: Math.round(e.position.z) },
+         dist: Math.round(e.position.distanceTo(bot.entity.position)),
+         isHostile: false
       })),
     players: Object.keys(bot.players || {}),
     config: { host: CONFIG.MC_HOST, port: CONFIG.MC_PORT, username: CONFIG.MC_USERNAME }
@@ -771,16 +860,17 @@ app.get('/api/events', (req, res) => {
          isDay: (bot.time?.timeOfDay < 13000)
       },
       entities: Object.values(bot.entities)
-        .filter(e => e.type !== 'object' && e.id !== bot.entity?.id && e.position.distanceTo(bot.entity.position) < 32)
+        .filter(e => e.type === 'player' && e.id !== bot.entity?.id && e.position.distanceTo(bot.entity.position) < 32)
         .map(e => ({
            name: e.displayName || e.username || e.name,
            type: e.type,
-           pos: e.position,
-           dist: e.position.distanceTo(bot.entity.position).toFixed(1),
-           isHostile: (['zombie','skeleton','creeper','spider','enderman','witch','slime','phantom','drowned','husk','stray','hoglin','piglin','zoglin'].includes(e.name))
+           pos: { x: Math.round(e.position.x), y: Math.round(e.position.y), z: Math.round(e.position.z) },
+           dist: Math.round(e.position.distanceTo(bot.entity.position)),
+           isHostile: false
         })),
       logs: recentLogs,
       modules: botModules,
+      players: Object.keys(bot.players || {}),
       config: { host: CONFIG.MC_HOST, port: CONFIG.MC_PORT, username: CONFIG.MC_USERNAME }
     };
     res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -829,12 +919,13 @@ app.post('/api/action', (req, res) => {
 });
 
 app.post('/api/config', (req, res) => {
-  const { host, port, username, owner, version } = req.body;
+  const { host, port, username, owner, version, auth } = req.body;
   if (host) CONFIG.MC_HOST = host;
   if (port) CONFIG.MC_PORT = parseInt(port);
   if (username) CONFIG.MC_USERNAME = username;
   if (owner) CONFIG.MC_OWNER = owner;
   if (version) CONFIG.MC_VERSION = version;
+  if (auth) CONFIG.MC_AUTH = auth;
   
   log('info', `🌐 Web Control: Configuration updated. Reconnecting...`);
   scheduleReconnect(100); // Immediate reconnect with new config
@@ -843,7 +934,7 @@ app.post('/api/config', (req, res) => {
 
 app.post('/api/mode', (req, res) => {
   const { mode, owner } = req.body;
-  if (['AUTONOMOUS', 'IDLE', 'COMPANION', 'FOLLOW'].includes(mode)) {
+  if (['AUTONOMOUS', 'IDLE', 'COMPANION', 'FOLLOW', 'KILL'].includes(mode)) {
     botMode = mode;
     const targetOwner = owner || CONFIG.MC_OWNER;
     if (targetOwner) companionOwner = targetOwner;

@@ -4,8 +4,8 @@
   "description": "Minecraft Java bot to keep server alive — deployable on Render",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node index.js"
+    "start": "node --max-old-space-size=450 index.js",
+    "dev": "node --max-old-space-size=450 index.js"
   },
   "engines": {
     "node": ">=18.0.0"
