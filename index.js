@@ -503,33 +503,36 @@ async function triggerRandomBehavior() {
   // 🛡️ TOP PRIORITY: GEAR CHECK (Runs every tick! Done before anything else)
   // Ensure we are wearing the best gear and holding weapons
   const items = bot.inventory.items();
+  // 📿 MANDATORY: Off-hand Protection (Totem > Shield)
+  const totem = items.find(i => i.name === 'totem_of_undying');
+  const shield = items.find(i => i.name === 'shield');
+  const offHandItem = bot.inventory.slots[45];
+  
+  if (totem) {
+    if (!offHandItem || offHandItem.name !== 'totem_of_undying') {
+      bot.equip(totem, 'off-hand').catch(() => {});
+    }
+  } else if (shield) {
+    if (!offHandItem || offHandItem.name !== 'shield') {
+      bot.equip(shield, 'off-hand').catch(() => {});
+    }
+  }
+
+  // 🛡️ GEAR: Armor & Weapons
   const armorSlotsMap = {
     helmet: 'head',
     chestplate: 'torso',
     leggings: 'legs',
     boots: 'feet',
-    shield: 'off-hand',
   };
   for (const [key, slot] of Object.entries(armorSlotsMap)) {
     const best = items
       .filter(i => i.name.includes(key))
       .sort((a, b) => (b.value || 0) - (a.value || 0))[0];
+    const slotId = slot === 'head' ? 5 : slot === 'torso' ? 6 : slot === 'legs' ? 7 : slot === 'feet' ? 8 : 45;
     if (
       best &&
-      (!bot.inventory.slots[
-        slot === 'head' ? 5 : slot === 'torso' ? 6 : slot === 'legs' ? 7 : slot === 'feet' ? 8 : 45
-      ] ||
-        bot.inventory.slots[
-          slot === 'head'
-            ? 5
-            : slot === 'torso'
-              ? 6
-              : slot === 'legs'
-                ? 7
-                : slot === 'feet'
-                  ? 8
-                  : 45
-        ].name !== best.name)
+      (!bot.inventory.slots[slotId] || bot.inventory.slots[slotId].name !== best.name)
     ) {
       bot.equip(best, slot).catch(() => {});
     }
@@ -936,8 +939,11 @@ function createBot() {
       const items = bot.inventory.items();
       const sword = items.find(i => i.name.includes('sword') || i.name.includes('axe'));
       const shield = items.find(i => i.name === 'shield');
+      const totem = items.find(i => i.name === 'totem_of_undying');
+      
       if (sword) bot.equip(sword, 'hand').catch(() => {});
-      if (shield) bot.equip(shield, 'off-hand').catch(() => {});
+      if (totem) bot.equip(totem, 'off-hand').catch(() => {});
+      else if (shield) bot.equip(shield, 'off-hand').catch(() => {});
 
       log('warn', `🤺 COMBAT FRENZY: Engaging target!`);
       bot.pvp.attack(target);
