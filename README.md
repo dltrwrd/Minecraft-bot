@@ -1,4 +1,4 @@
-# 🤖 Minecraft Java Advanced Bot (Pro Edition)
+# 🤖 Minecraft Java 
 
 A high-performance Node.js bot built with **Mineflayer**. More than just a keep-alive bot, this is a fully autonomous survival companion capable of defending you, gathering resources, and following instructions.
 
@@ -8,7 +8,7 @@ A high-performance Node.js bot built with **Mineflayer**. More than just a keep-
 
 | Category | Feature | Description |
 |---|---|---|
-| 🛡️ **Defensive** | **Resbak Mode** | Automatically counter-attacks anyone who hurts the bot or its "Master". |
+| 🛡️ **Defensive** | **Self-defense Mode** | Automatically counter-attacks anyone who hurts the bot or its "Master". |
 | 🪓 **Survival** | **Auto-Gather** | Intelligently mines logs and stone to upgrade its gear. |
 | 🛠️ **Utility** | **Auto-Craft** | Crafts its own planks, sticks, pickaxes, swords, and furnaces. |
 | 👕 **Combat** | **Auto-Equip** | Dynamically equips the best armor and swords in its inventory. |
